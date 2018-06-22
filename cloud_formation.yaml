@@ -1,0 +1,117 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Description: 'Aurora clone manager'
+Parameters:
+  LogLevel:
+    Type: String
+    Description: "LAmbda log level"
+    Default: info
+  CustomResourceType:
+    Type: String
+    Description: "The CloudFormation custom resource type implemented by this function"
+    Default: "Custom::AuroraClone"
+  MaxCopyAge:
+    Type: String
+    Description: "The maximum age of a copy from which a clone can be created, as ISO 8601 duration"
+    Default: P3D
+  MaxClonesPerSource:
+    Type: Number
+    Description: "The maximum number of Aurora clones per source"
+    Default: 15
+  MaintenanceSchedule:
+    Type: String
+    Description: "The schedule expression for the maintenance task"
+    Default: "rate(1 days)"
+  # The parameters used for auto-following a branch
+  GitHubRepo:
+    Type: String
+    Description: "The GitHub repo of hosting this service"
+  GitBranchFollow:
+    Type: String
+    Description: "The git branch to autofollow, !follow is a special value used to turn this off"
+    Default: "!follow"
+  GitSha:
+    Type: String
+    Description: "The git sha, should be provided by the build script by overwriting the default value"
+Resources:
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action:
+              - 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: RDSManagement
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - rds:DescribeDBClusters
+                  - rds:DescribeDBInstances
+                Resource:
+                  - '*'
+              - Effect: Allow
+                Action:
+                  - rds:DescribeDBClusters
+                  - rds:DescribeDBInstances
+                  - rds:ListTagsForResource
+                  - rds:DeleteDBInstance
+                  - rds:DeleteDBCluster
+                  - rds:RestoreDBClusterToPointInTime
+                  - rds:CreateDBInstance
+                Resource:
+                  - !Sub arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:cluster:*
+                  - !Sub arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:db:*
+                  - !Sub arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:subgrp:*
+                  - !Sub arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:og:*
+              - Effect: Allow
+                Action:
+                  - ssm:DescribeParameters
+                  - ssm:GetParameters
+                  - ssm:GetParameter
+                Resource:
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/maintenance-config
+  Lambda:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: aurora-clone-manager.core.HandleCustomResource
+      Runtime: java8
+      CodeUri: ./target/uberjar/lambda.jar
+      Description: "Aurora clone management"
+      MemorySize: 512
+      Timeout: 300
+      Role: !GetAtt LambdaRole.Arn
+      ReservedConcurrentExecutions: 1
+      Environment:
+        Variables:
+          LOG_LEVEL: !Ref LogLevel
+          RESOURCE_TYPE: !Ref CustomResourceType
+          MAX_AGE: !Ref MaxCopyAge
+          MAX_CLONES_PER_SOURCE: !Ref MaxClonesPerSource
+          MAINTENANCE_CONFIG_SSM: !Sub /${AWS::StackName}/maintenance-config
+      Events:
+        Maintenance:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref MaintenanceSchedule
+            Input: '{"source": "events", "action": "maintain!"}'
+Outputs:
+  LambdaName:
+    Description: The name of the created lambda fn
+    Value: !Ref Lambda
+    Export:
+      Name: !Sub "${AWS::StackName}-LambdaName"
+  LambdaArn:
+    Description: The ARN of the created lambda fn
+    Value: !GetAtt Lambda.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-LambdaArn"

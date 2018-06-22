@@ -1,0 +1,11 @@
+{
+  "StackId": "arn:aws:cloudformation:us-west-2:EXAMPLE/stack-name/guid",
+  "ResponseURL": "http://pre-signed-S3-url-for-response",
+  "ResourceProperties": {
+    "ClusterId": "vadim-test-cluster"
+  },
+  "RequestType": "Create",
+  "ResourceType": "Custom::AuroraClone",
+  "RequestId": "unique id for this create request",
+  "LogicalResourceId": "MyTestResource"
+}

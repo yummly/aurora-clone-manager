@@ -1,0 +1,32 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Aurora clone manager example'
+Parameters:
+  SourceClusterId:
+    Type: String
+    Description: "The ID of the root cluster"
+  CopyCreatedSince:
+    Type: String
+    Description: "To be eligible for cloning, a copy must have been created after this time"
+    Default: 1970-01-01T00:00:00.000Z
+Resources:
+  Clone:
+    Type: Custom::AuroraClone
+    Properties:
+      ServiceToken: !ImportValue 'aurora-clone-manager-LambdaArn'
+      SourceClusterId: !Ref SourceClusterId
+      CopyOk: true
+      InstanceClass: db.r4.large
+      CopyCreatedSince: !Ref CopyCreatedSince
+Outputs:
+  CloneClusterArn:
+    Description: The ARN of the created clone
+    Value: !GetAtt Clone.Arn
+  CloneClusterId:
+    Description: The ID of the created clone
+    Value: !GetAtt Clone.ClusterId
+  CloneClusterEndpoint:
+    Description: The endpoint of the created clone
+    Value: !GetAtt Clone.Endpoint
+  CloneClusterReaderEndpoint:
+    Description: The endpoint of the created clone
+    Value: !GetAtt Clone.ReaderEndpoint

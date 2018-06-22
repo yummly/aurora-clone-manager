@@ -1,0 +1,87 @@
+AWSTemplateFormatVersion: '2010-09-09'
+#Transform: 'AWS::Serverless-2016-10-31'
+Description: CodeBuild for Aurora clone manager
+Parameters:
+  GitHubRepo:
+    Type: String
+    Description: "The GitHub repo of hosting this service"
+  Description:
+    Type: String
+    Description: Description of this stack
+    Default: 'The build for the CloudFormation auto-update lambda'
+  CodeBuildName:
+    Type: String
+    Description: "The name of the CodeBuild job"
+    Default: "cloudformation-autoupdate-lambda"
+  LambdaS3Bucket:
+    Type: String
+    Description: "The S3 bucket for the lambda jar"
+  LambdaS3Prefix:
+    Type: String
+    Description: "The S3 prefix for the lambda jar"
+Resources:
+  BuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: !Sub "/${AWS::StackName}/"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action:
+              - 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+      Policies:
+        - PolicyName: CodeBuildBase
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Generic CodeBuild
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${AWS::StackName}-build
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${AWS::StackName}-build:*
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub arn:aws:s3:::${LambdaS3Bucket}/${LambdaS3Prefix}/*
+      ManagedPolicyArns:
+        - !Sub arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser
+  BuildProject:
+    Type: "AWS::CodeBuild::Project"
+    Properties:
+      Name: !Sub "${AWS::StackName}-build"
+      Source:
+        Type: GITHUB
+        Location: !Ref GitHubRepo
+        BuildSpec: buildspec.yml
+        Auth:
+          Type: OAUTH
+        GitCloneDepth: 1
+      Artifacts:
+        Type: no_artifacts
+      BadgeEnabled: false
+      Environment:
+        Type: LINUX_CONTAINER
+        Image: aws/codebuild/docker:17.09.0
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        EnvironmentVariables:
+          - Name: LAMBDA_S3_BUCKET
+            Value: !Ref LambdaS3Bucket
+          - Name: LAMBDA_S3_PREFIX
+            Value: !Ref LambdaS3Prefix
+        PrivilegedMode: true
+      ServiceRole: !GetAtt BuildRole.Arn
+      TimeoutInMinutes: 60
+Outputs:
+  BuildName:
+    Description: the CodeBuild project
+    Value: !Ref BuildProject
+  BuildConsolePage:
+    Description: the CodeBuild project page
+    Value: !Sub "https://console.aws.amazon.com/codebuild/home?region=${AWS::Region}#/projects/${BuildProject}/view"
