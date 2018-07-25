@@ -90,6 +90,7 @@ Resources:
       MemorySize: 512
       Timeout: 300
       Role: !GetAtt LambdaRole.Arn
+      # concurrency needs to be set to 1, the Lambda doesn't support concurrent executions
       ReservedConcurrentExecutions: 1
       Environment:
         Variables:

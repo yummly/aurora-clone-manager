@@ -1,6 +1,8 @@
-* Aurora Clone Manager
+#+TITLE: Aurora Clone Manager
 
-This is a utility for creating AWS RDS Aurora clones on demand, e.g., clones of a production DB for test purposes. The great thing about Aurora clones is the copy-on-write
+* Overview
+
+This is a utility for creating AWS RDS Aurora clones on demand, e.g., clones of a production DB for test purposes.  The great thing about Aurora clones is the copy-on-write
 implementation which makes them reasonably cheap and fast.
 
 This utility solves for two shortcomings in current Aurora functionality:
@@ -11,40 +13,63 @@ This utility solves for two shortcomings in current Aurora functionality:
 
 2. A single cluster can have no more than 15 clones.
 
-   We work around this by keeping a pool of copies, where each copy allows you to have 15 more clones. Copies are created and deleted based on a few parameters: the maximum age of
-   a copy and the number of spare cloning "slots" required. Creating a copy is a slow operation when the database is large, so the pool maintenance should be done as a background
+   We work around this by keeping a pool of copies, where each copy allows you to have 15 more clones.  Copies are created and deleted based on a few parameters: the maximum age of
+   a copy and the number of spare cloning "slots" required.  Creating a copy is a slow operation when the database is large, so the pool maintenance should be done as a background
    process (e.g., nightly) rather than on demand.
 
 * How it works
+
+** Custom resource
+
+The [[https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/template-custom-resources.html][custom resource]] is implemented by a Lambda defined in src/aurora_clone_manager/core.clj which manages the the create, update, and delete operations on the Aurora clones.  Given
+the name of a source cluster, the Lambda will either clone it or, if the source already has the maximum number of clones, it will create a copy of the source and then clone the
+copy.
+
+When requesting a clone, it's possible to specify the maximum age of a copy.  Only copies newer than the max age will be considered for cloning.
+
+** The maintenance process
+
+The Lambda is also called regularly to "maintain" the supported clusters by deleting obsolete copies and creating new ones.  Since the copy operation is slow, it is useful to
+pre-create copies when you know you will need them.
+
+The maintenance process is configured by a data structure of the following format:
+
+#+BEGIN_SRC clojure
+{:clusters [{:cluster-id "cluster-name", :target-clone-slots 20, :dry-run? false}]}
+#+END_SRC
+
+This can specify more than one cluster.  Both EDN (as above) and JSON are supported formats.  The configuration is stored in an SSM parameter named
+~/${AWS::StackName}/maintenance-config~, see [[#building][Building and deploying]].
 
 * Usage
 
 ** From CloudFormation
 
-Once you [[#building][install]] the Lambda function, you can create Aurora clones as CloudFormation custom resources. Here's an example resource:
+Once you [[#building][install]] the Lambda function, you can create Aurora clones as CloudFormation custom resources.  Here's an example resource:
 
 #+BEGIN_SRC yaml
   Clone:
-    Type: Custom::AuroraClone
+    Type: Custom::AuroraClone # must match the CustomResourceType parameter of the stack used to deploy the Lambda
     Properties:
-      ServiceToken: !ImportValue 'aurora-clone-manager-LambdaArn'
+      # replace ${CloneManagerStackName} with the name of the stack you used to deploy the Lambda. In the example below, it's aurora-clone-manager
+      ServiceToken: !ImportValue '${CloneManagerStackName}-LambdaArn'
       SourceClusterId: !Ref SourceClusterId
       CopyOk: true
       InstanceClass: db.r4.large
       CopyCreatedSince: !Ref CopyCreatedSince
 #+END_SRC
 
-You can see a full example in [[example/template.yaml][example/template.yaml]]. You can try it with the following command:
+You can see a full example in [[example/template.yaml][example/template.yaml]].  You can try it with the following command:
 
 #+BEGIN_SRC shell
-aws cloudformation deploy --template-file example/template.yaml --stack-name vadim-aurora-example --capabilities CAPABILITY_IAM --parameter-overrides SourceClusterId=your-cluster CopyCreatedSince=2018-07-20T00:30:00
+aws cloudformation deploy --template-file example/template.yaml --stack-name aurora-example --capabilities CAPABILITY_IAM --parameter-overrides SourceClusterId=your-cluster CopyCreatedSince=2018-07-20T00:30:00
 #+END_SRC
 
 In order to do that, you need an existing Aurora cluster and you need AWS CLI installed and configured on your machine.
 
 ** From Clojure repl
 
-The most basic way of using this is from a Clojure repl. You can create a clone like this:
+The most basic way of using this is from a Clojure repl.  You can create a clone like this:
 
 #+BEGIN_SRC clojure
   (provision-cluster-copy! {:source-cluster-id "cluster" ;; clone this cluster
@@ -57,12 +82,9 @@ The most basic way of using this is from a Clojure repl. You can create a clone 
                               :copy-created-since     (ft/parse "2018-01-01") ;; clone either the master or a copy created after this time this and `:max-copy-age` are optional, but
                                                                               ;; if specified, both conditions must be true for a copy to be used (i.e., the copy must be newer that
                                                                               ;; the most recent of [(- (t/now) max-copy-age), copy-created-since)]
-                              :dry-run?  true ;; if true, just explain what we wuld do without making any changes })
+                              :dry-run?  true ;; if true, just explain what we would do without making any changes })
 #+END_SRC
 
-** Clone creation Lambda
-
-** Copy pool maintenance
 
 * @@html:<a name="building">@@Building and deploying
 :PROPERTIES:
@@ -81,10 +103,23 @@ The following command will build the Clojure code and deploy a CloudFormation st
 LAMBDA_S3_BUCKET=your-bucket LAMBDA_S3_PREFIX=your-prefix STACK_NAME=aurora-clone-manager ./build.sh
 #+END_SRC
 
+This script will both build the Lambda jar and deploy the Lambda as part of a CloudFormation stack.  The template is in [[cloud_formation.yaml][cloud_formation.yaml]].  You may want to pass additional
+parameters:
+
+- ~MaxCopyAge~: the maximum age of a usable copy.
+- ~MaxClonesPerSource~: the maximum number of clones per Aurora cluster, this is currently limited by AWS to 15 and cannot be raised.
+- ~MaintenanceSchedule~: the schedule expression used to invoke the maintenance logic.  The default it ~rate(1 day)~ but if you want to run this at a specific time you will need to use a schedule instead of a rate.
+
+Parameters can be appended to the ~build.sh~ invocation, e.g.
+
+#+BEGIN_SRC shell
+... ./build.sh MaxCopyAge=3
+#+END_SRC
+
 ** Using CodeBuild
 
-You can optionally setup AWS CodeBuild to build this project. The configuration files for CodeBuild are included here. This is not very useful on its own, but cna be useful if you
-setup further steps to deploy the newly build versions. These steps are not currently included, but you could use AWS CodeDeploy and CodePipeline.
+You can optionally setup AWS CodeBuild to build this project.  The configuration files for CodeBuild are included here.  This is not very useful on its own, but can be useful if
+you setup further steps to deploy the newly build versions.  These steps are not currently included, but you could use AWS CodeDeploy and CodePipeline.
 
 Create a CodeBuild project by running ~create-build-stack.sh~:
 
@@ -94,6 +129,13 @@ LAMBDA_S3_BUCKET=your-bucket LAMBDA_S3_PREFIX=your-prefix ./create-build-stack.s
 
 Specify the bucket and prefix where the CloudFormation template for the new version will be copied.
 
-If you have forked this repo and have admin access to the fork, uncomment the last two lines in the ~create-build-stack.sh~ script to have CodeBuild create a GitHub hook, which will build the project on
-every push. Important: before you do this, you need to go to the CodeBuild part of the AWS console and connect it to your GitHub account. This has to be done only once per AWS
-account per region.
+If you have forked this repo and have admin access to the fork, uncomment the last two lines in the ~create-build-stack.sh~ script to have CodeBuild create a GitHub hook, which
+will build the project on every push.  Important: before you do this, you need to go to the CodeBuild part of the AWS console and connect it to your GitHub account.  This has to be
+done only once per AWS account per region.
+
+* Limitations
+
+- This has been tested only with Aurora PostgreSQL but there is nothing Postgres-specific in the code and it may work with Aurora MySQL.
+
+- While the cloning is fast in theory, it is somewhat less so in practice.  Cloning a cluster just under 1TB in size takes about 22 minutes for me at the time of writing (in the
+  us-east-1 region).  This may or may not be improved by AWS in the future.

@@ -8,11 +8,7 @@ Parameters:
   Description:
     Type: String
     Description: Description of this stack
-    Default: 'The build for the CloudFormation auto-update lambda'
-  CodeBuildName:
-    Type: String
-    Description: "The name of the CodeBuild job"
-    Default: "cloudformation-autoupdate-lambda"
+    Default: 'The build for the Aurora Clone Manager'
   LambdaS3Bucket:
     Type: String
     Description: "The S3 bucket for the lambda jar"

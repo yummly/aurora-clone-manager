@@ -557,9 +557,6 @@
 (comment
   (def example-request (-> "test-data/create-request.json" io/resource slurp (json/parse-string true))))
 
-(defn maintenance-rule-arn []
-  (lambda-config-property "MAINTENANCE_RULE_ARN"))
-
 (deflambdafn aurora-clone-manager.core.HandleCustomResource
   [in out ctx]
   (let [^LambdaLogger logger (.getLogger ^Context ctx)
