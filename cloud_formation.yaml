@@ -21,7 +21,7 @@ Parameters:
   MaintenanceSchedule:
     Type: String
     Description: "The schedule expression for the maintenance task"
-    Default: "rate(1 days)"
+    Default: "rate(1 day)"
   # The parameters used for auto-following a branch
   GitHubRepo:
     Type: String
@@ -33,6 +33,10 @@ Parameters:
   GitSha:
     Type: String
     Description: "The git sha, should be provided by the build script by overwriting the default value"
+  SecretPrefix:
+    Type: String
+    Description: "The prefix for password secrets"
+    Default: "/aurora-clone-manager/"
 Resources:
   LambdaRole:
     Type: AWS::IAM::Role
@@ -68,6 +72,7 @@ Resources:
                   - rds:DeleteDBCluster
                   - rds:RestoreDBClusterToPointInTime
                   - rds:CreateDBInstance
+                  - rds:ModifyDBCluster
                 Resource:
                   - !Sub arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:cluster:*
                   - !Sub arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:db:*
@@ -80,8 +85,19 @@ Resources:
                   - ssm:GetParameter
                 Resource:
                   - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/maintenance-config
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:PutSecretValue
+                  - secretsmanager:DeleteSecret
+                  - secretsmanager:CreateSecret
+                  - secretsmanager:TagResource
+                  - secretsmanager:UntagResource
+                Resource:
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretPrefix}*"
+
   Lambda:
-    Type: 'AWS::Serverless::Function'
+    Type: AWS::Serverless::Function
     Properties:
       Handler: aurora-clone-manager.core.HandleCustomResource
       Runtime: java8
@@ -99,12 +115,27 @@ Resources:
           MAX_AGE: !Ref MaxCopyAge
           MAX_CLONES_PER_SOURCE: !Ref MaxClonesPerSource
           MAINTENANCE_CONFIG_SSM: !Sub /${AWS::StackName}/maintenance-config
+          SECRET_PREFIX: !Ref SecretPrefix
       Events:
+        RDSEvents:
+          Type: SNS
+          Properties:
+            Topic: !Ref RDSEventTopic
         Maintenance:
           Type: Schedule
           Properties:
             Schedule: !Ref MaintenanceSchedule
             Input: '{"source": "events", "action": "maintain!"}'
+  RDSEventTopic:
+    Type: AWS::SNS::Topic
+  RDSEventSubscription:
+    Type: AWS::RDS::EventSubscription
+    Properties:
+      Enabled: true
+      EventCategories:
+        - creation
+      SnsTopicArn: !Ref RDSEventTopic
+      SourceType: db-instance
 Outputs:
   LambdaName:
     Description: The name of the created lambda fn
@@ -116,3 +147,8 @@ Outputs:
     Value: !GetAtt Lambda.Arn
     Export:
       Name: !Sub "${AWS::StackName}-LambdaArn"
+  RoleArn:
+    Description: "The ARN of the created lambda fn's role, Can be used to, e.g., grant permissions on KMS keys"
+    Value: !GetAtt LambdaRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-RoleArn"

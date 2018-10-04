@@ -1,29 +1,59 @@
 (ns aurora-clone-manager.core
-  (:require [amazonica.aws
-             [s3 :as s3]]
-            [amazonica.aws
-             [cloudformation :as cf]
-             [simplesystemsmanagement :as ssm]
-             [rds :as rds]
-             [securitytoken :as sts]]
-            [amazonica.core :as amz]
-            [clojure.string :as str]
-            [clojure.java.io :as io]
-            [taoensso.timbre :as log]
-            [clj-time
-             [core :as t]
-             [format :as ft]
-             [coerce :as ct]]
-            [clojure.set :as set]
-            [uswitch.lambada.core :refer [deflambdafn]]
+  (:require [amazonica.aws.rds :as rds]
+            [amazonica.aws.secretsmanager :as secrets]
+            [amazonica.aws.securitytoken :as sts]
+            [amazonica.aws.simplesystemsmanagement :as ssm]
             [cheshire.core :as json]
-            [org.httpkit.client :as http]
+            [clj-time.core :as t]
+            [clj-time.format :as ft]
             [clojure.core.memoize :as mem]
+            [clojure.java.io :as io]
+            [clojure.set :as set]
             [clojure.spec.alpha :as s]
-            [clojure.spec.test.alpha :as stest])
-  (:import [org.joda.time DateTime Period]
-           [com.amazonaws.services.lambda.runtime RequestStreamHandler Context LambdaLogger]
-           [com.amazonaws.regions Region Regions]))
+            [clojure.spec.test.alpha :as stest]
+            [clojure.string :as str]
+            [crypto.random :as cr]
+            [org.httpkit.client :as http]
+            [taoensso.timbre :as log]
+            [uswitch.lambada.core :refer [deflambdafn]])
+  (:import [com.amazonaws.regions Region Regions]
+           [com.amazonaws.services.lambda.runtime Context LambdaLogger]
+           com.amazonaws.services.rds.model.DBClusterNotFoundException
+           com.amazonaws.services.secretsmanager.model.ResourceNotFoundException
+           org.joda.time.Period))
+
+(s/check-asserts true)
+(set! *warn-on-reflection* true)
+
+(defn lambda-config-property
+  ([^String p default]
+   (or (System/getProperty p)
+       (System/getenv p)
+
+       default))
+  ([^String p]
+   (lambda-config-property p nil)))
+
+(def non-empty-string? (s/and string? (complement str/blank?)))
+
+(s/def ::secret-prefix non-empty-string?)
+(s/def ::cluster-id non-empty-string?)
+(s/def ::kms-key-id non-empty-string?)
+(s/def ::target-clone-slots (s/and integer? pos?))
+(s/def ::max-copy-age (s/and integer? pos?))
+(s/def ::max-clones-per-source (s/and integer? pos?))
+(s/def ::purge-obsolete-copies? boolean?)
+(s/def ::dry-run? boolean?)
+(s/def ::source-cluster-id non-empty-string?)
+(s/def ::instance-class non-empty-string?)
+(s/def ::restore-type #{:full-copy :copy-on-write})
+(s/def ::create-instance? boolean?)
+(s/def ::db-subnet-group-name non-empty-string?)
+(s/def ::vpc-security-group-ids (s/coll-of non-empty-string?))
+(s/def ::tags (s/map-of non-empty-string? non-empty-string?))
+(s/def ::db-parameter-group non-empty-string?)
+(s/def ::cluster-parameter-group non-empty-string?)
+(s/def ::password-secret non-empty-string?)
 
 (def tag-role "y.aurora.role")
 (def role-source "source")
@@ -32,6 +62,8 @@
 (def tag-source-arn "y.aurora.source-cluster-arn")
 (def tag-root-arn "y.aurora.root-cluster-arn")
 (def tag-data-timestamp "y.aurora.data-timestamp")
+(def tag-cluster-id "y.aurora.cluster-id")
+(def tag-password-secret "y.aurora.password-secret")
 
 (def default-max-clones-per-source 15)
 (def default-max-copy-age (t/days 3))
@@ -59,9 +91,12 @@
 (defn cluster-tags
   "Get cluster tags as a map"
   [cluster-id]
-  (let [tags (-> (rds/list-tags-for-resource {:resource-name (cluster-id->arn cluster-id)})
-                 :tag-list)]
-    (zipmap (map :key tags) (map :value tags))))
+  (try
+    (let [tags (-> (rds/list-tags-for-resource {:resource-name (cluster-id->arn cluster-id)})
+                   :tag-list)]
+      (zipmap (map :key tags) (map :value tags)))
+    (catch DBClusterNotFoundException e
+      nil)))
 
 (defn cluster-role [cluster-id]
   (get (cluster-tags cluster-id) tag-role))
@@ -76,6 +111,11 @@
   (if-let [t (get tags tag-data-timestamp)]
     (ft/parse t)
     default))
+
+(defn map->tags [tags]
+  (for [[k v] tags
+        :when (and k v)]
+    {:key k :value v}))
 
 (defn cluster-data-timestamp [cluster-id]
   (-> (cluster-tags cluster-id)
@@ -101,10 +141,13 @@
   (let [cluster (-> (rds/describe-db-clusters {:db-cluster-identifier cluster-id})
                     :dbclusters
                     first)
-        members (map :dbinstance-identifier (:dbcluster-members cluster))]
+        members (map :dbinstance-identifier (:dbcluster-members cluster))
+        password-secret (get (cluster-tags cluster-id) tag-password-secret)]
     (doseq [m members]
       (rds/delete-db-instance {:db-instance-identifier m}))
-    (rds/delete-db-cluster {:db-cluster-identifier cluster-id :skip-final-snapshot skip-final-snapshot?})))
+    (rds/delete-db-cluster {:db-cluster-identifier cluster-id :skip-final-snapshot skip-final-snapshot?})
+    (when password-secret
+      (secrets/delete-secret {:secret-id password-secret}))))
 
 
 (defn cluster->data [cluster]
@@ -113,31 +156,66 @@
       (set/rename-keys {:dbcluster-identifier :id
                         :dbcluster-arn        :arn})))
 
+(defn random-password []
+  (cr/hex 32))
+
+(def default-secret-prefix "/aurora-clone-manager/")
+
+(defn secret-prefix []
+  (lambda-config-property "SECRET_PREFIX" default-secret-prefix))
+
+(s/def ::create-password!-args (s/keys :req-un [::cluster-id ::kms-key-id]))
+
+(defn create-password! [{:keys [secret-prefix cluster-id kms-key-id]
+                         :or   {secret-prefix default-secret-prefix}
+                         :as   args}]
+  (s/assert ::create-password!-args args)
+  (let [secret-name (cond-> secret-prefix
+                      (not (str/ends-with? secret-prefix "/")) (str "/")
+                      :always                                  (str "password/" cluster-id))]
+    (try
+      (secrets/put-secret-value {:secret-id     secret-name
+                                 :kms-key-id    kms-key-id
+                                 :secret-string (random-password)
+                                 :tags          (map->tags {tag-cluster-id cluster-id})})
+      (catch ResourceNotFoundException _
+        (secrets/create-secret {:name          secret-name
+                                :kms-key-id    kms-key-id
+                                :secret-string (random-password)
+                                :tags          (map->tags {tag-cluster-id cluster-id})})))))
+
+(s/fdef create-password!
+  :args (s/tuple ::create-password!-args))
+
+(s/def ::create-copy!-args (s/keys :req-un [::cluster-id ::source-cluster-id]
+                                   :opt-un [::restore-type ::create-instance? ::db-subnet-group-name ::vpc-security-group-ids ::tags ::db-parameter-group ::cluster-parameter-group ::password-secret]))
+
 (defn create-copy!
   "Create a copy of the cluster by restoring a backup. The `restore-type` parameter specifies whether it's a full copy (`full-copy`) or a clone (`copy-on-write`)"
   [{:keys [cluster-id source-cluster-id instance-class restore-type create-instance? db-subnet-group-name vpc-security-group-ids tags
-           db-parameter-group cluster-parameter-group]
+           db-parameter-group cluster-parameter-group
+           password-secret]
     :or   {instance-class   "db.r4.large"
            restore-type     :full-copy
            create-instance? true
-           tags             {}}}]
-  {:pre [source-cluster-id]}
+           tags             {}}
+    :as   args}]
+  (s/assert ::create-copy!-args args)
   (when-let [source (-> (rds/describe-db-clusters {:db-cluster-identifier source-cluster-id})
                         :dbclusters
                         first)]
-    (let [cluster-id            (or cluster-id
-                                    (format "%s-%s" source-cluster-id (ft/unparse (ft/formatter "YYYY-MM-dd-HH-mm-ss-SSS") (t/now))))
-          source-tags           (cluster-tags source-cluster-id)
+    (let [source-tags           (cluster-tags source-cluster-id)
           _                     (log/infof "creating cluster %s as a %s of %s" cluster-id restore-type source-cluster-id)
           ;; if the source is a copy, it will have the data-timestamp tag. otherwise consider the data up-to-date
           source-data-timestamp (tags->data-timestamp source-tags (t/now))
-          tags                  (merge tags
-                                       {tag-role           (case (name restore-type)
-                                                             "full-copy"     role-copy
-                                                             "copy-on-write" role-clone)
-                                        tag-source-arn     (:dbcluster-arn source)
-                                        tag-root-arn       (get source-tags tag-root-arn (:dbcluster-arn source))
-                                        tag-data-timestamp (ft/unparse (:date-time ft/formatters) source-data-timestamp)})
+          tags                  (cond-> tags
+                                  :always         (merge {tag-role           (case (name restore-type)
+                                                                               "full-copy"     role-copy
+                                                                               "copy-on-write" role-clone)
+                                                          tag-source-arn     (:dbcluster-arn source)
+                                                          tag-root-arn       (get source-tags tag-root-arn (:dbcluster-arn source))
+                                                          tag-data-timestamp (ft/unparse (:date-time ft/formatters) source-data-timestamp)})
+                                  password-secret (assoc tag-password-secret password-secret))
           cluster               (rds/restore-db-cluster-to-point-in-time
                                  (cond-> {:source-db-cluster-identifier source-cluster-id
                                           :db-cluster-identifier        cluster-id
@@ -147,8 +225,7 @@
                                                                             (:dbsubnet-group source))
                                           :vpc-security-group-ids       (or vpc-security-group-ids
                                                                             (->> source :vpc-security-groups (map :vpc-security-group-id)))
-                                          :tags                         (for [[k v] tags]
-                                                                          {:key k :value v})}
+                                          :tags                         (map->tags tags)}
                                    cluster-parameter-group (assoc :db-cluster-parameter-group-name cluster-parameter-group)))]
       (when create-instance?
         (rds/create-db-instance
@@ -229,17 +306,19 @@
 
 (defn provision-cluster-copy!
   "Create a Aurora cluster clone or copy."
-  [{:keys [source-cluster-id cluster-id max-copy-age max-clones-per-source instance-class purge-obsolete-copies? copy-ok? dry-run? copy-created-since]
-                                :or   {purge-obsolete-copies? true
-                                       copy-ok?               true
-                                       instance-class         "db.r4.large"
-                                       dry-run?               true}
-                                :as   args}]
+  [{:keys [source-cluster-id cluster-id max-copy-age max-clones-per-source instance-class purge-obsolete-copies? copy-ok? dry-run? copy-created-since secret-prefix secret-kms-key-id]
+    :or   {purge-obsolete-copies? true
+           copy-ok?               true
+           instance-class         "db.r4.large"
+           dry-run?               true}
+    :as   args}]
   (log/infof "provisioning a clone of %s" source-cluster-id)
   (let [{:keys [root obsolete-copies cloneable-sources]} (-> args
                                                              (dissoc :instance-class :purge-obsolete-copies? :copy-ok? :dry-run?)
                                                              (set/rename-keys {:source-cluster-id :cluster-id})
-                                                             analyze)]
+                                                             analyze)
+        cluster-id                                       (or cluster-id
+                                                             (format "%s-%s" source-cluster-id (ft/unparse (ft/formatter "YYYY-MM-dd-HH-mm-ss-SSS") (t/now))))]
     (when-not root
       (throw (ex-info (format "source cluster %s does not exist" source-cluster-id) {:error :cluster-does-not-exist})))
     (when (and purge-obsolete-copies? (seq obsolete-copies))
@@ -248,26 +327,21 @@
         (future
           (doseq [{:keys [dbcluster-identifier]} obsolete-copies]
             (terminate-cluster! {:cluster-id dbcluster-identifier :skip-final-snapshot? true})))))
-    (if-let [source (first cloneable-sources)]
-      (do
-        (log/infof "creating a clone of %s" source-cluster-id)
-        (when-not dry-run?
-          (create-clone! {:source-cluster-id source-cluster-id :instance-class instance-class :cluster-id cluster-id})))
-      (if copy-ok?
-        (do
-          (log/infof "no clone slots available, will create a copy of %s" source-cluster-id)
-          (when-not dry-run?
-            (create-copy! {:source-cluster-id source-cluster-id :instance-class instance-class :cluster-id cluster-id})))
-        (throw (ex-info (format "unable to provision a cluster because there are not clone slots available and :copy-ok? was false")
-                        {:error :no-clone-slots-and-not-copy-ok}))))))
+    (let [{password-secret :name} (when secret-kms-key-id
+                                    (create-password! {:cluster-id cluster-id :kms-key-id secret-kms-key-id}))
+          copy-args               {:source-cluster-id source-cluster-id :instance-class instance-class :cluster-id cluster-id
+                                   :password-secret   password-secret}
+          cloneable?              (boolean (first cloneable-sources))
+          _                       (when (and (not cloneable?) (not copy-ok?))
+                                    (throw (ex-info (format "unable to provision a cluster because there are not clone slots available and :copy-ok? was false")
+                                                    {:error :no-clone-slots-and-not-copy-ok})))
+          _                       (if cloneable?
+                                    (log/infof "creating a clone of %s" source-cluster-id)
+                                    (log/infof "no clone slots available, will create a copy of %s" source-cluster-id))
+          copy-resource           (when-not dry-run?
+                                    (create-copy! (assoc copy-args :restore-type (if cloneable? :copy-on-write :full-copy))))]
+      (assoc copy-resource :password-secret password-secret))))
 
-
-(s/def ::cluster-id string?)
-(s/def ::target-clone-slots (s/and integer? pos?))
-(s/def ::max-copy-age (s/and integer? pos?))
-(s/def ::max-clones-per-source (s/and integer? pos?))
-(s/def ::purge-obsolete-copies? boolean?)
-(s/def ::dry-run? boolean?)
 
 (s/def ::maintain-args (s/keys :req-un [::cluster-id ::target-clone-slots]
                                :opt-un [::purge-obsolete-copies? ::max-clones-per-source ::max-copy-age ::dry-run?]))
@@ -282,6 +356,7 @@
            dry-run?               true
            max-clones-per-source  default-max-clones-per-source}
     :as   args}]
+  (s/assert ::maintain-args args)
   (log/infof "doing maintenance on %s" cluster-id)
   (let [{:keys [root obsolete-copies cloneable-sources available-clone-slots]} (-> args
                                                                                    (dissoc  :purge-obsolete-copies? :dry-run?)
@@ -311,14 +386,7 @@
 (s/fdef maintain! :args (s/cat :args ::maintain-args))
 (stest/instrument `maintain!)
 
-(defn lambda-config-property
-  ([^String p default]
-   (or (System/getProperty p)
-       (System/getenv p)
 
-       default))
-  ([^String p]
-   (lambda-config-property p nil)))
 
 (defn log-level []
   (-> (lambda-config-property "LOG_LEVEL" "info")
@@ -360,7 +428,8 @@
   (set/rename-keys c {:arn             :Arn
                       :id              :ClusterId
                       :endpoint        :Endpoint
-                      :reader-endpoint :ReaderEndpoint}))
+                      :reader-endpoint :ReaderEndpoint
+                      :password-secret :PasswordSecret}))
 
 (defn parse-properties
   "Convert properties as specified in a CF resource into the internal representation"
@@ -371,7 +440,8 @@
                         :CopyOk              :copy-ok?
                         :PurgeObsoleteCopies :purge-obsolete-copies?
                         :InstanceClass       :instance-class
-                        :CopyCreatedSince    :copy-created-since})
+                        :CopyCreatedSince    :copy-created-since
+                        :SecretKmsKeyId      :secret-kms-key-id})
       (update :copy-created-since (fnil ft/parse "2000-00-00"))))
 
 (defn do-create! [args]
@@ -458,9 +528,6 @@
                                             :as            args}]
   (log/infof "event:\n%s" (with-out-str
                             (clojure.pprint/pprint args)))
-  (when-not (= resource-type (supported-resource-type))
-    (throw (ex-info (format "invalid resource type %s, only %s is supported" resource-type (supported-resource-type))
-                    {:error :invalid-resource-type})))
   (let [req      {:stack-id             stack-id
                   :request-id           request-id
                   :logical-resource-id  logical-resource-id
@@ -469,6 +536,9 @@
                   :old-properties       old-properties
                   :physical-resource-id physical-resource-id}
         response (try
+                   (when-not (= resource-type (supported-resource-type))
+                     (throw (ex-info (format "invalid resource type %s, only %s is supported" resource-type (supported-resource-type))
+                                     {:error :invalid-resource-type})))
                    (case request-type
                      "Create" (handle-create! req)
                      "Update" (handle-update! req)
@@ -541,7 +611,7 @@
   (cond
     (= action "maintain!")
     (do
-      (log/info "maintenance: %s" event)
+      (log/infof "maintenance: %s" event)
       (when-let [config (get-maintenance-config)]
         (doseq [cluster (:clusters config)]
           (log/infof "Running maintenance on %s" cluster)
@@ -551,6 +621,40 @@
             (catch Exception e
               (log/errorf e "Error with maintenance on %s" cluster))))))
     :else (log/warnf "Unrecognized action in event %s" event)))
+
+(defn handle-rds-instance-created! [{:keys [event-source event-time source-id event-id event-message] :as event}]
+  (let [instance-id source-id
+        instance    (-> (rds/describe-db-instances {:db-instance-identifier instance-id})
+                        :dbinstances
+                        first)
+        cluster-id  (:dbcluster-identifier instance)]
+    (if cluster-id
+      (let [tags            (cluster-tags cluster-id)
+            password-secret (get tags tag-password-secret)]
+        (if password-secret
+          (let [password (:secret-string (secrets/get-secret-value {:secret-id password-secret}))]
+            (rds/modify-db-cluster {:db-cluster-identifier cluster-id
+                                    :master-user-password  password
+                                    :apply-immediately     true})
+            (log/infof "Set master password for %s to the secret %s" cluster-id password-secret))
+          (log/infof "DB cluster %s doesn't have a password secret" cluster-id)))
+      (log/infof "DB instance %s does not exists or is not Aurora" instance-id))))
+
+(defn handle-rds-event! [event]
+  (let [{:keys [event-source event-time source-id event-id event-message] :as event}
+        (set/rename-keys event
+                         {(keyword "Event Source")  :event-source
+                          (keyword "Event Time")    :event-time
+                          (keyword "Source ID")     :source-id
+                          (keyword "Event ID")      :event-id
+                          (keyword "Event Message") :event-message})]
+    (cond
+      (and (= event-source "db-instance")
+           (= event-message "DB instance created"))
+      (handle-rds-instance-created! event)
+
+      :else
+      (log/infof "Ignoring unsupported RDS event %s" event))))
 
 (comment
   (def example-request (-> "test-data/create-request.json" io/resource slurp (json/parse-string true))))
@@ -562,14 +666,28 @@
         fn-name (.getFunctionName ^Context ctx)
         fn-name-for-config (or (lambda-config-property "FUNCTION_NAME")
                                fn-name)]
+    (s/check-asserts true)
     (log/with-config (lambda-logging-config log-fn)
       (try
         (let [event (with-open [r (io/reader in)]
                       (json/decode-stream r true))]
           ;; A scheduled event call (with `source": "aws.events")
-          (if (= (:source event) "events")
+          (cond
+            (= (:source event) "events")
             (handle-maintenance! event)
-            (handle-custom-resource-lambda-call! event)))
+
+            (:ResourceType event)
+            (handle-custom-resource-lambda-call! event)
+
+            (:Records event)
+            (doseq [rec (:Records event)
+                    :let [m (get-in rec [:Sns :Message])]
+                    :when m
+                    :let [m (json/parse-string m true)]]
+              (handle-rds-event! m))
+
+            :else
+            (log/infof "received unrecognized event: %s" event)))
         (catch clojure.lang.ExceptionInfo ex
           (log/errorf ex "error in %s" fn-name)
           (throw ex))

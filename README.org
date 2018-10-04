@@ -27,6 +27,16 @@ copy.
 
 When requesting a clone, it's possible to specify the maximum age of a copy.  Only copies newer than the max age will be considered for cloning.
 
+** Authentication
+
+The clone manager allows you to give a clone a different master password. This is useful, for example, for letting people use a development database without knowing the production master
+password. This works only when the clone manager is deployed as a Lambda function. This is how it works:
+
+- Before making the clone, clone manager generates a random password and stores it in an [[https://aws.amazon.com/secrets-manager/][AWS Secret]]. The secret is encrypted with a [[https://aws.amazon.com/kms/][KMS]] key of your choice. The secrets have a
+  prefix configured as a Lambda environment variable, defaulting to ~/aurora-clone-manager/~.
+- Once the new DB instance comes up, the clone manager sets its master password to the generated value.
+- The name of the secret is returned as an output of the custom resource and also stored as a tag of the RDS cluster.
+
 ** The maintenance process
 
 The Lambda is also called regularly to "maintain" the supported clusters by deleting obsolete copies and creating new ones.  Since the copy operation is slow, it is useful to
@@ -54,9 +64,10 @@ Once you [[#building][install]] the Lambda function, you can create Aurora clone
       # replace ${CloneManagerStackName} with the name of the stack you used to deploy the Lambda. In the example below, it's aurora-clone-manager
       ServiceToken: !ImportValue '${CloneManagerStackName}-LambdaArn'
       SourceClusterId: !Ref SourceClusterId
-      CopyOk: true
+      CopyOk: false
       InstanceClass: db.r4.large
       CopyCreatedSince: !Ref CopyCreatedSince
+      SecretKmsKeyId: "kms-key-id"
 #+END_SRC
 
 You can see a full example in [[example/template.yaml][example/template.yaml]].  You can try it with the following command:
@@ -73,16 +84,16 @@ The most basic way of using this is from a Clojure repl.  You can create a clone
 
 #+BEGIN_SRC clojure
   (provision-cluster-copy! {:source-cluster-id "cluster" ;; clone this cluster
-                              :cluster-id   "new-cluster"  ;; and give the new cluster this name
-                              :max-copy-age (t/days 2)     ;; clone either the source cluster itself, or, if it already has 15 clones, one of its copies as long as the copy is less
-                                                           ;; than 2 days old
-                              :max-clones-per-source  "db.r4.large" ;; the instance type of the new new clone
-                              :purge-obsolete-copies? true          ;; if we find copies older than `:max-copy-age`, should we delete them
-                              :copy-ok?               false         ;; if there are no clone slots available, should we create a copy (which may take much longer)
-                              :copy-created-since     (ft/parse "2018-01-01") ;; clone either the master or a copy created after this time this and `:max-copy-age` are optional, but
-                                                                              ;; if specified, both conditions must be true for a copy to be used (i.e., the copy must be newer that
-                                                                              ;; the most recent of [(- (t/now) max-copy-age), copy-created-since)]
-                              :dry-run?  true ;; if true, just explain what we would do without making any changes })
+                            :cluster-id   "new-cluster"  ;; and give the new cluster this name
+                            :max-copy-age (t/days 2)     ;; clone either the source cluster itself, or, if it already has 15 clones, one of its copies as long as the copy is less
+                                                         ;; than 2 days old
+                            :max-clones-per-source  "db.r4.large" ;; the instance type of the new clone
+                            :purge-obsolete-copies? true          ;; if we find copies older than `:max-copy-age`, should we delete them
+                            :copy-ok?               false         ;; if there are no clone slots available, should we create a copy (which may take much longer)
+                            :copy-created-since     (ft/parse "2018-01-01") ;; clone either the master or a copy created after this time this and `:max-copy-age` are optional, but
+                                                                            ;; if specified, both conditions must be true for a copy to be used (i.e., the copy must be newer that
+                                                                            ;; the most recent of [(- (t/now) max-copy-age), copy-created-since)]
+                            :dry-run?  true ;; if true, just explain what we would do without making any changes })
 #+END_SRC
 
 
