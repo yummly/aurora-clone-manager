@@ -25,8 +25,6 @@
            [com.amazonaws.services.lambda.runtime RequestStreamHandler Context LambdaLogger]
            [com.amazonaws.regions Region Regions]))
 
-(set! *warn-on-reflection* true)
-
 (def tag-role "y.aurora.role")
 (def role-source "source")
 (def role-clone "clone")

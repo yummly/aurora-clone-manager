@@ -1,3 +1,5 @@
+(def aws-sdk-version "1.11.282")
+
 (defproject aurora-clone-manager "0.1.0-SNAPSHOT"
   :description "Create and delete Aurora clones on demand"
   :license {:name "Eclipse Public License"
@@ -13,13 +15,13 @@
                  ;; [com.amazonaws/aws-lambda-java-events "1.3.0"
                  ;;  :exclusions [com.amazonaws/aws-java-sdk-dynamodb]]
                  [com.amazonaws/aws-lambda-java-log4j "1.0.0"]
-                 [com.amazonaws/aws-java-sdk-s3 "1.11.282"]
-                 [com.amazonaws/aws-java-sdk-kinesis "1.11.282"]
-                 [com.amazonaws/aws-java-sdk-cloudformation "1.11.282"]
-                 [com.amazonaws/aws-java-sdk-ssm "1.11.282"]
-                 [com.amazonaws/aws-java-sdk-lambda "1.11.282"]
-                 [com.amazonaws/aws-java-sdk-rds "1.11.282"]
-                 [com.amazonaws/aws-java-sdk-sts "1.11.282"]
+                 [com.amazonaws/aws-java-sdk-s3 ~aws-sdk-version]
+                 [com.amazonaws/aws-java-sdk-kinesis ~aws-sdk-version]
+                 [com.amazonaws/aws-java-sdk-cloudformation ~aws-sdk-version]
+                 [com.amazonaws/aws-java-sdk-ssm ~aws-sdk-version]
+                 [com.amazonaws/aws-java-sdk-lambda ~aws-sdk-version]
+                 [com.amazonaws/aws-java-sdk-rds ~aws-sdk-version]
+                 [com.amazonaws/aws-java-sdk-sts ~aws-sdk-version]
                  [com.taoensso/encore "2.87.0"]
                  [com.taoensso/timbre "4.7.4"
                   :exclusions [com.taoensso/encore]]
@@ -31,6 +33,7 @@
                  [com.sun.xml.bind/jaxb-core "2.2.11"]
                  [http-kit "2.2.0"]
                  [org.clojure/core.memoize "0.7.1"]]
+  :global-vars {*warn-on-reflection* true}
   :plugins [[lein-eftest "0.4.1"]]
   :eftest {:multithread?    true
            :report          eftest.report.progress/report

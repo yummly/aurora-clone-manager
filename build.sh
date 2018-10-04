@@ -13,12 +13,17 @@ fi
 if [[ -z "$GIT_SHA" ]]
 then
     GIT_SHA=$(git rev-parse HEAD)
+    # If uncommitted changes, then mark the GIT_SHA as dirty
+    [[ -z $(git status -s) ]] || GIT_SHA="$GIT_SHA-DIRTY"
 fi
+
 
 if [[ -z "$JAR" ]]
 then
     JAR=lambda.jar
 fi
+
+echo $GIT_SHA
 
 GITHUB_REPO=${GIT_URL:-$(git remote get-url origin)}
 REPO_NAME=$(echo $GITHUB_REPO | sed -e 's/\.git$//' | sed -e 's|^.*/||')

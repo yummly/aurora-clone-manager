@@ -6,4 +6,4 @@ env:
 phases:
   build:
     commands:
-      - bash -c "cd $CODEBUILD_SRC_DIR && GIT_URL=$CODEBUILD_SOURCE_REPO_URL GIT_COMMIT=$(git rev-parse HEAD) $CODEBUILD_SRC_DIR/build.sh"
+      - bash -c "cd $CODEBUILD_SRC_DIR && GIT_URL=$CODEBUILD_SOURCE_REPO_URL $CODEBUILD_SRC_DIR/build.sh"

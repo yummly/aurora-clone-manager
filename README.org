@@ -21,7 +21,7 @@ This utility solves for two shortcomings in current Aurora functionality:
 
 ** Custom resource
 
-The [[https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/template-custom-resources.html][custom resource]] is implemented by a Lambda defined in src/aurora_clone_manager/core.clj which manages the the create, update, and delete operations on the Aurora clones.  Given
+The [[https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/template-custom-resources.html][custom resource]] is implemented by a Lambda defined in ~src/aurora_clone_manager/core.clj~ which manages the the create, update, and delete operations on the Aurora clones.  Given
 the name of a source cluster, the Lambda will either clone it or, if the source already has the maximum number of clones, it will create a copy of the source and then clone the
 copy.
 
@@ -130,7 +130,9 @@ LAMBDA_S3_BUCKET=your-bucket LAMBDA_S3_PREFIX=your-prefix ./create-build-stack.s
 Specify the bucket and prefix where the CloudFormation template for the new version will be copied.
 
 If you have forked this repo and have admin access to the fork, uncomment the last two lines in the ~create-build-stack.sh~ script to have CodeBuild create a GitHub hook, which
-will build the project on every push.  Important: before you do this, you need to go to the CodeBuild part of the AWS console and connect it to your GitHub account.  This has to be
+will build the project on every push.
+
+*Important*: before you do this, you need to go to the CodeBuild part of the AWS console and connect it to your GitHub account.  This has to be
 done only once per AWS account per region.
 
 * Limitations
