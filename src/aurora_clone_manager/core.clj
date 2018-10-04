@@ -172,7 +172,8 @@
   (s/assert ::create-password!-args args)
   (let [secret-name (cond-> secret-prefix
                       (not (str/ends-with? secret-prefix "/")) (str "/")
-                      :always                                  (str "password/" cluster-id))]
+                      ;; add the timestamp because once a secret has been created and deleted, it apparently can't be created again
+                      :always                                  (str "password/" cluster-id "-" (ft/unparse (ft/formatter "YYYY-MM-dd-HH-mm-ss-SSS") (t/now))))]
     (try
       (secrets/put-secret-value {:secret-id     secret-name
                                  :kms-key-id    kms-key-id
