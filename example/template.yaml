@@ -12,10 +12,9 @@ Parameters:
     Type: String
     Description: "The name of the stack defining the Aurora clone manager"
     Default: "aurora-clone-manager"
-  AccessPrincipal:
+  AccessUserName:
     Type: String
-    Description: "The principal to grant access to the key, see https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_principal.html#Principal_specifying"
-    Default: "*"
+    Description: "The user to grant access to the key, see https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_principal.html#Principal_specifying"
 Resources:
   SecretKMSKey:
     Type: AWS::KMS::Key
@@ -32,12 +31,12 @@ Resources:
                   !Sub "${CloneManagerStack}-RoleArn"
             Action: 'kms:*'
             Resource: '*'
-          - Sid: Enable access by a group of users
-            Effect: Allow
-            Principal:
-              AWS: !Ref AccessPrincipal
-            Action: 'kms:*'
-            Resource: '*'
+          # - Sid: Enable access by a group of users
+          #   Effect: Allow
+          #   Principal:
+          #     AWS: !Ref AccessPrincipal
+          #   Action: 'kms:*'
+          #   Resource: '*'
           - Sid: Enable IAM User Permissions
             Effect: Allow
             Principal:
@@ -56,6 +55,26 @@ Resources:
       InstanceClass: db.r4.large
       CopyCreatedSince: !Ref CopyCreatedSince
       SecretKmsKeyId: !Ref SecretKMSKey
+
+  PasswordSecretAccessPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      Users:
+        - !Ref AccessUserName
+      PolicyName: PasswordSecretAccess
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+            Resource:
+              - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Clone.PasswordSecret}"
+          - Effect: Allow
+            Action:
+              - kms:Decrypt
+            Resource:
+              - !GetAtt SecretKMSKey.Arn
 
 Outputs:
   CloneClusterArn:
