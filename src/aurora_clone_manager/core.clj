@@ -329,8 +329,8 @@
             (terminate-cluster! {:cluster-id dbcluster-identifier :skip-final-snapshot? true})))))
     (let [{password-secret :name} (when secret-kms-key-id
                                     (create-password! {:cluster-id cluster-id :kms-key-id secret-kms-key-id}))
-          copy-args               {:source-cluster-id source-cluster-id :instance-class instance-class :cluster-id cluster-id
-                                   :password-secret   password-secret}
+          copy-args               (cond-> {:source-cluster-id source-cluster-id :instance-class instance-class :cluster-id cluster-id}
+                                    password-secret (assoc :password-secret password-secret))
           cloneable?              (boolean (first cloneable-sources))
           _                       (when (and (not cloneable?) (not copy-ok?))
                                     (throw (ex-info (format "unable to provision a cluster because there are not clone slots available and :copy-ok? was false")
