@@ -12,38 +12,10 @@ Parameters:
     Type: String
     Description: "The name of the stack defining the Aurora clone manager"
     Default: "aurora-clone-manager"
-  AccessUserName:
-    Type: String
+  AccessPrincipalArns:
+    Type: CommaDelimitedList
     Description: "The user to grant access to the key, see https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_principal.html#Principal_specifying"
 Resources:
-  SecretKMSKey:
-    Type: AWS::KMS::Key
-    Properties:
-      KeyPolicy:
-        Version: 2012-10-17
-        Id: key-default-1
-        Statement:
-          - Sid: Enable access by the clone manager
-            Effect: Allow
-            Principal:
-              AWS:
-                Fn::ImportValue:
-                  !Sub "${CloneManagerStack}-RoleArn"
-            Action: 'kms:*'
-            Resource: '*'
-          # - Sid: Enable access by a group of users
-          #   Effect: Allow
-          #   Principal:
-          #     AWS: !Ref AccessPrincipal
-          #   Action: 'kms:*'
-          #   Resource: '*'
-          - Sid: Enable IAM User Permissions
-            Effect: Allow
-            Principal:
-              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
-            Action: 'kms:*'
-            Resource: '*'
-          # You may need to add additional permissions here to be able to decrypt the secret
   Clone:
     Type: Custom::AuroraClone
     Properties:
@@ -54,28 +26,8 @@ Resources:
       CopyOk: true
       InstanceClass: db.r4.large
       CopyCreatedSince: !Ref CopyCreatedSince
-      SecretKmsKeyId: !Ref SecretKMSKey
-
-  PasswordSecretAccessPolicy:
-    Type: AWS::IAM::Policy
-    Properties:
-      Users:
-        - !Ref AccessUserName
-      PolicyName: PasswordSecretAccess
-      PolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Action:
-              - secretsmanager:GetSecretValue
-            Resource:
-              - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Clone.PasswordSecret}"
-          - Effect: Allow
-            Action:
-              - kms:Decrypt
-            Resource:
-              - !GetAtt SecretKMSKey.Arn
-
+      SetPassword: true
+      AccessPrincipalArns: !Ref AccessPrincipalArns
 Outputs:
   CloneClusterArn:
     Description: The ARN of the created clone
@@ -92,3 +44,6 @@ Outputs:
   ClonePasswordSecret:
     Description: The secret containing the clone password
     Value: !GetAtt Clone.PasswordSecret
+  ClonePasswordKmsKeyId:
+    Description: The key used to encrypt the secret
+    Value: !GetAtt Clone.KmsKeyId

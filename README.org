@@ -29,13 +29,14 @@ When requesting a clone, it's possible to specify the maximum age of a copy.  On
 
 ** Authentication
 
-The clone manager allows you to give a clone a different master password. This is useful, for example, for letting people use a development database without knowing the production master
-password. This works only when the clone manager is deployed as a Lambda function. This is how it works:
+The clone manager allows you to give a clone a different master password if you pass ~SetPassword: true~. This is useful, for example, for letting people use a development database
+without knowing the production master password. This works only when the clone manager is deployed as a Lambda function. This is how it works:
 
-- Before making the clone, clone manager generates a random password and stores it in an [[https://aws.amazon.com/secrets-manager/][AWS Secret]]. The secret is encrypted with a [[https://aws.amazon.com/kms/][KMS]] key of your choice. The secrets have a
-  prefix configured as a Lambda environment variable, defaulting to ~/aurora-clone-manager/~.
+- Before making the clone, clone manager generates a random password and stores it in an [[https://aws.amazon.com/secrets-manager/][AWS Secret]]. The secrets have a prefix configured as a Lambda environment variable,
+  defaulting to ~/aurora-clone-manager/~.
 - Once the new DB instance comes up, the clone manager sets its master password to the generated value.
-- The name of the secret is returned as an output of the custom resource and also stored as a tag of the RDS cluster.
+- The name of the secret and the ID of the KMS key used to encrypt it are returned as an output of the custom resource and also stored as a tag of the RDS cluster.
+- If you pass ~SetPassword: true~ you must also pass a list of one of more ARNs of IAM [[https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_principal.html][principals]] to whom read permissions will be [[https://docs.aws.amazon.com/secretsmanager/latest/userguide/auth-and-access_resource-based-policies.html][granted]] on the secret and key.
 
 ** The maintenance process
 
@@ -67,13 +68,14 @@ Once you [[#building][install]] the Lambda function, you can create Aurora clone
       CopyOk: false
       InstanceClass: db.r4.large
       CopyCreatedSince: !Ref CopyCreatedSince
-      SecretKmsKeyId: "kms-key-id"
+      SetPassword: true
+      AccessPrincipalArns: arn:aws:iam::12345678:role/my-role, ...
 #+END_SRC
 
 You can see a full example in [[example/template.yaml][example/template.yaml]].  You can try it with the following command:
 
 #+BEGIN_SRC shell
-aws cloudformation deploy --template-file example/template.yaml --stack-name aurora-example --capabilities CAPABILITY_IAM --parameter-overrides SourceClusterId=your-cluster CopyCreatedSince=2018-07-20T00:30:00
+aws cloudformation deploy --template-file example/template.yaml --stack-name aurora-example --capabilities CAPABILITY_IAM --parameter-overrides SourceClusterId=your-cluster CopyCreatedSince=2018-07-20T00:30:00 AccessPrincipalArns=arn:aws:iam::12345678:role/my-role
 #+END_SRC
 
 In order to do that, you need an existing Aurora cluster and you need AWS CLI installed and configured on your machine.

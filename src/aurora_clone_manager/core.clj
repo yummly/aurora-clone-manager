@@ -3,6 +3,7 @@
             [amazonica.aws.secretsmanager :as secrets]
             [amazonica.aws.securitytoken :as sts]
             [amazonica.aws.simplesystemsmanagement :as ssm]
+            [amazonica.aws.kms :as kms]
             [cheshire.core :as json]
             [clj-time.core :as t]
             [clj-time.format :as ft]
@@ -54,6 +55,7 @@
 (s/def ::db-parameter-group non-empty-string?)
 (s/def ::cluster-parameter-group non-empty-string?)
 (s/def ::password-secret non-empty-string?)
+(s/def ::access-principal-arns (s/every non-empty-string? :min-count 1))
 
 (def tag-role "y.aurora.role")
 (def role-source "source")
@@ -64,6 +66,9 @@
 (def tag-data-timestamp "y.aurora.data-timestamp")
 (def tag-cluster-id "y.aurora.cluster-id")
 (def tag-password-secret "y.aurora.password-secret")
+(def tag-password-key "y.aurora.password-key")
+(def tag-key-purpose "y.key-purpose")
+(def tag-key-purpose-value "aurora-clone-secret")
 
 (def default-max-clones-per-source 15)
 (def default-max-copy-age (t/days 3))
@@ -80,6 +85,11 @@
    (fn []
      (:account (sts/get-caller-identity {})))))
 
+
+(def caller-arn
+  (memoize
+   (fn []
+     (:arn (sts/get-caller-identity {})))))
 
 (defn cluster-id->arn [cluster-id]
   (format "arn:aws:rds:%s:%s:cluster:%s" (aws-region) (aws-account-id) cluster-id))
@@ -142,12 +152,15 @@
                     :dbclusters
                     first)
         members (map :dbinstance-identifier (:dbcluster-members cluster))
-        password-secret (get (cluster-tags cluster-id) tag-password-secret)]
+        password-secret (get (cluster-tags cluster-id) tag-password-secret)
+        password-key (get (cluster-tags cluster-id) tag-password-key)]
     (doseq [m members]
       (rds/delete-db-instance {:db-instance-identifier m}))
     (rds/delete-db-cluster {:db-cluster-identifier cluster-id :skip-final-snapshot skip-final-snapshot?})
     (when password-secret
-      (secrets/delete-secret {:secret-id password-secret}))))
+      (secrets/delete-secret {:secret-id password-secret}))
+    (when password-key
+      (kms/schedule-key-deletion {:key-id password-key :pending-window-in-days 30}))))
 
 
 (defn cluster->data [cluster]
@@ -155,6 +168,36 @@
       (select-keys [:dbcluster-identifier :dbcluster-arn :endpoint :reader-endpoint])
       (set/rename-keys {:dbcluster-identifier :id
                         :dbcluster-arn        :arn})))
+
+(s/def ::create-key!-args (s/keys :req-un [::access-principal-arns]))
+
+(defn create-key! [{:keys [access-principal-arns] :as args}]
+  (s/assert ::create-key!-args args)
+  (let [{:keys [key-id arn]} (:key-metadata (kms/create-key
+                                             {:tags [{:tag-key   tag-key-purpose
+                                                      :tag-value tag-key-purpose-value}]}))]
+    (kms/put-key-policy {:key-id      key-id
+                         :policy-name "default" ;; this is the only valid value
+                         :policy      (-> {:Version   "2012-10-17"
+                                           :Id        "key-default"
+                                           :Statement [{:Effect    "Allow"
+                                                        :Action    ["kms:Decrypt"]
+                                                        :Resource  "*"
+                                                        :Principal {:AWS access-principal-arns}}
+                                                       {:Effect    "Allow"
+                                                        :Action    ["kms:*"]
+                                                        :Resource  "*"
+                                                        :Principal {:AWS (caller-arn)}}
+                                                       {:Effect    "Allow"
+                                                        :Action    ["kms:*"]
+                                                        :Resource  "*"
+                                                        :Principal {:AWS (format "arn:aws:iam::%s:root" (aws-account-id))}}]}
+                                          (json/generate-string {:pretty true}))})
+
+    key-id))
+
+(s/fdef create-key!
+  :args (s/tuple ::create-key!-args))
 
 (defn random-password []
   (cr/hex 32))
@@ -164,16 +207,22 @@
 (defn secret-prefix []
   (lambda-config-property "SECRET_PREFIX" default-secret-prefix))
 
-(s/def ::create-password!-args (s/keys :req-un [::cluster-id ::kms-key-id]))
+(s/def ::create-password!-args (s/keys :req-un [::cluster-id ::access-principal-arns]))
 
-(defn create-password! [{:keys [secret-prefix cluster-id kms-key-id]
+(defn create-password! [{:keys [secret-prefix cluster-id access-principal-arns]
                          :or   {secret-prefix default-secret-prefix}
                          :as   args}]
   (s/assert ::create-password!-args args)
-  (let [secret-name (cond-> secret-prefix
-                      (not (str/ends-with? secret-prefix "/")) (str "/")
-                      ;; add the timestamp because once a secret has been created and deleted, it apparently can't be created again
-                      :always                                  (str "password/" cluster-id "-" (ft/unparse (ft/formatter "YYYY-MM-dd-HH-mm-ss-SSS") (t/now))))]
+  (let [secret-name          (cond-> secret-prefix
+                               (not (str/ends-with? secret-prefix "/")) (str "/")
+                               ;; add the timestamp because once a secret has been created and deleted, it apparently can't be created again
+                               :always                                  (str "password/" cluster-id "-" (ft/unparse (ft/formatter "YYYY-MM-dd-HH-mm-ss-SSS") (t/now))))
+        {:keys [kms-key-id]} (try
+                               (secrets/describe-secret {:secret-id secret-name})
+                               (catch Exception _
+                                 nil))
+        kms-key-id           (or kms-key-id
+                                 (create-key! {:access-principal-arns access-principal-arns}))]
     (try
       (secrets/put-secret-value {:secret-id     secret-name
                                  :kms-key-id    kms-key-id
@@ -183,19 +232,32 @@
         (secrets/create-secret {:name          secret-name
                                 :kms-key-id    kms-key-id
                                 :secret-string (random-password)
-                                :tags          (map->tags {tag-cluster-id cluster-id})})))))
+                                :tags          (map->tags {tag-cluster-id cluster-id})})))
+    (secrets/put-resource-policy {:secret-id       secret-name
+                                  :resource-policy (-> {:Version   "2012-10-17"
+                                                        :Id        "key-default"
+                                                        :Statement [{:Effect    "Allow"
+                                                                     :Action    ["secretsmanager:GetSecretValue"]
+                                                                     :Resource  "*"
+                                                                     :Principal {:AWS access-principal-arns}}
+                                                                    {:Effect    "Allow"
+                                                                     :Action    ["secretsmanager:GetSecretValue"]
+                                                                     :Resource  "*"
+                                                                     :Principal {:AWS access-principal-arns}}]}
+                                                       (json/generate-string {:pretty true}))})
+    {:password-secret secret-name :kms-key-id kms-key-id}))
 
 (s/fdef create-password!
   :args (s/tuple ::create-password!-args))
 
 (s/def ::create-copy!-args (s/keys :req-un [::cluster-id ::source-cluster-id]
-                                   :opt-un [::restore-type ::create-instance? ::db-subnet-group-name ::vpc-security-group-ids ::tags ::db-parameter-group ::cluster-parameter-group ::password-secret]))
+                                   :opt-un [::restore-type ::create-instance? ::db-subnet-group-name ::vpc-security-group-ids ::tags ::db-parameter-group ::cluster-parameter-group ::password-secret ::kms-key-id]))
 
 (defn create-copy!
   "Create a copy of the cluster by restoring a backup. The `restore-type` parameter specifies whether it's a full copy (`full-copy`) or a clone (`copy-on-write`)"
   [{:keys [cluster-id source-cluster-id instance-class restore-type create-instance? db-subnet-group-name vpc-security-group-ids tags
            db-parameter-group cluster-parameter-group
-           password-secret]
+           password-secret kms-key-id]
     :or   {instance-class   "db.r4.large"
            restore-type     :full-copy
            create-instance? true
@@ -216,7 +278,8 @@
                                                           tag-source-arn     (:dbcluster-arn source)
                                                           tag-root-arn       (get source-tags tag-root-arn (:dbcluster-arn source))
                                                           tag-data-timestamp (ft/unparse (:date-time ft/formatters) source-data-timestamp)})
-                                  password-secret (assoc tag-password-secret password-secret))
+                                  password-secret (assoc tag-password-secret password-secret
+                                                         tag-password-key kms-key-id))
           cluster               (rds/restore-db-cluster-to-point-in-time
                                  (cond-> {:source-db-cluster-identifier source-cluster-id
                                           :db-cluster-identifier        cluster-id
@@ -307,7 +370,7 @@
 
 (defn provision-cluster-copy!
   "Create a Aurora cluster clone or copy."
-  [{:keys [source-cluster-id cluster-id max-copy-age max-clones-per-source instance-class purge-obsolete-copies? copy-ok? dry-run? copy-created-since secret-prefix secret-kms-key-id]
+  [{:keys [source-cluster-id cluster-id max-copy-age max-clones-per-source instance-class purge-obsolete-copies? copy-ok? dry-run? copy-created-since secret-prefix set-password? access-principal-arns]
     :or   {purge-obsolete-copies? true
            copy-ok?               true
            instance-class         "db.r4.large"
@@ -328,20 +391,20 @@
         (future
           (doseq [{:keys [dbcluster-identifier]} obsolete-copies]
             (terminate-cluster! {:cluster-id dbcluster-identifier :skip-final-snapshot? true})))))
-    (let [{password-secret :name} (when secret-kms-key-id
-                                    (create-password! {:cluster-id cluster-id :kms-key-id secret-kms-key-id}))
-          copy-args               (cond-> {:source-cluster-id source-cluster-id :instance-class instance-class :cluster-id cluster-id}
-                                    password-secret (assoc :password-secret password-secret))
-          cloneable?              (boolean (first cloneable-sources))
-          _                       (when (and (not cloneable?) (not copy-ok?))
-                                    (throw (ex-info (format "unable to provision a cluster because there are not clone slots available and :copy-ok? was false")
-                                                    {:error :no-clone-slots-and-not-copy-ok})))
-          _                       (if cloneable?
-                                    (log/infof "creating a clone of %s" source-cluster-id)
-                                    (log/infof "no clone slots available, will create a copy of %s" source-cluster-id))
-          copy-resource           (when-not dry-run?
-                                    (create-copy! (assoc copy-args :restore-type (if cloneable? :copy-on-write :full-copy))))]
-      (assoc copy-resource :password-secret password-secret))))
+    (let [password      (when set-password?
+                          (create-password! {:cluster-id cluster-id :access-principal-arns access-principal-arns}))
+          copy-args     (cond-> {:source-cluster-id source-cluster-id :instance-class instance-class :cluster-id cluster-id}
+                          password (merge password))
+          cloneable?    (boolean (first cloneable-sources))
+          _             (when (and (not cloneable?) (not copy-ok?))
+                          (throw (ex-info (format "unable to provision a cluster because there are not clone slots available and :copy-ok? was false")
+                                          {:error :no-clone-slots-and-not-copy-ok})))
+          _             (if cloneable?
+                          (log/infof "creating a clone of %s" source-cluster-id)
+                          (log/infof "no clone slots available, will create a copy of %s" source-cluster-id))
+          copy-resource (when-not dry-run?
+                          (create-copy! (assoc copy-args :restore-type (if cloneable? :copy-on-write :full-copy))))]
+      (merge copy-resource password))))
 
 
 (s/def ::maintain-args (s/keys :req-un [::cluster-id ::target-clone-slots]
@@ -430,7 +493,8 @@
                       :id              :ClusterId
                       :endpoint        :Endpoint
                       :reader-endpoint :ReaderEndpoint
-                      :password-secret :PasswordSecret}))
+                      :password-secret :PasswordSecret
+                      :kms-key-id      :KmsKeyId}))
 
 (defn parse-properties
   "Convert properties as specified in a CF resource into the internal representation"
@@ -442,7 +506,8 @@
                         :PurgeObsoleteCopies :purge-obsolete-copies?
                         :InstanceClass       :instance-class
                         :CopyCreatedSince    :copy-created-since
-                        :SecretKmsKeyId      :secret-kms-key-id})
+                        :SetPassword         :set-password?
+                        :AccessPrincipalArns :access-principal-arns})
       (update :copy-created-since (fnil ft/parse "2000-00-00"))))
 
 (defn do-create! [args]
@@ -497,7 +562,7 @@
         {:Status "SUCCESS"
          :Data   data})
 
-      ;;if only copy-created-since is changing, we may need to provision a new clone
+      ;;if only copy-created-since is changing, we may or may not need to provision a new clone
       (= (dissoc old-props :copy-created-since) (dissoc props :copy-created-since))
       (let [new-copy-created-since (:copy-created-since props)
             {cluster-id :ClusterId :as data} (cluster->cloudformation physical-resource-id)
@@ -550,7 +615,8 @@
                      (log/errorf e "error with request %s" args)
                      {:Status "FAILED"
                       :Reason (.getMessage e)}))
-        response (merge (select-keys args [:RequestId :LogicalResourceId :StackId :PhysicalResourceId])
+        response (merge {:PhysicalResourceId (java.util.UUID/randomUUID)} ;; make sure PhysicalResourceId is never empty
+                        (select-keys args [:RequestId :LogicalResourceId :StackId :PhysicalResourceId])
                         response)]
     (log/infof "response:\n%s" (with-out-str
                                  (clojure.pprint/pprint response)))
