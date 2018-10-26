@@ -532,6 +532,12 @@
         _                                      (log/infof "handle-create: response %s" response)]
     response))
 
+(defn cluster-tags->data [cluster-id]
+  (-> (cluster-tags cluster-id)
+      (set/rename-keys {tag-password-secret :password-secret
+                        tag-password-key :kms-key-id})
+      (select-keys [:password-secret :kms-key-id])))
+
 (defn cluster->cloudformation
   "Describe a cluster and convert the description to the output format of `handle-create!`"
   [cluster-arn]
@@ -540,6 +546,7 @@
         :dbclusters
         first
         cluster->data
+        (merge (cluster-tags->data cluster-id))
         cluster-data->cloudformation)))
 
 (defn handle-update!
