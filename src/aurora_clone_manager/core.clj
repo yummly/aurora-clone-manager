@@ -85,6 +85,8 @@
    (fn []
      (:account (sts/get-caller-identity {})))))
 
+(defn unique-timestamp []
+  (ft/unparse (ft/formatter "YYYY-MM-dd-HH-mm-ss-SSS") (t/now)))
 
 (def caller-arn
   (memoize
@@ -116,6 +118,15 @@
           :dbclusters
           first
           :cluster-create-time))
+
+(defn cluster-exists? [cluster-id]
+  (try
+    (-> (rds/describe-db-clusters {:db-cluster-identifier cluster-id})
+        :dbclusters
+        seq
+        boolean)
+    (catch Exception _
+      false)))
 
 (defn tags->data-timestamp [tags default]
   (if-let [t (get tags tag-data-timestamp)]
@@ -216,7 +227,7 @@
   (let [secret-name          (cond-> secret-prefix
                                (not (str/ends-with? secret-prefix "/")) (str "/")
                                ;; add the timestamp because once a secret has been created and deleted, it apparently can't be created again
-                               :always                                  (str "password/" cluster-id "-" (ft/unparse (ft/formatter "YYYY-MM-dd-HH-mm-ss-SSS") (t/now))))
+                               :always                                  (str "password/" cluster-id "-" (unique-timestamp)))
         {:keys [kms-key-id]} (try
                                (secrets/describe-secret {:secret-id secret-name})
                                (catch Exception _
@@ -370,7 +381,7 @@
 
 (defn provision-cluster-copy!
   "Create a Aurora cluster clone or copy."
-  [{:keys [source-cluster-id cluster-id max-copy-age max-clones-per-source instance-class purge-obsolete-copies? copy-ok? dry-run? copy-created-since secret-prefix set-password? access-principal-arns]
+  [{:keys [source-cluster-id cluster-id max-copy-age max-clones-per-source instance-class purge-obsolete-copies? copy-ok? dry-run? copy-created-since secret-prefix set-password? access-principal-arns no-fail-on-existing-cluster?]
     :or   {purge-obsolete-copies? true
            copy-ok?               true
            instance-class         "db.r4.large"
@@ -381,8 +392,14 @@
                                                              (dissoc :instance-class :purge-obsolete-copies? :copy-ok? :dry-run?)
                                                              (set/rename-keys {:source-cluster-id :cluster-id})
                                                              analyze)
-        cluster-id                                       (or cluster-id
-                                                             (format "%s-%s" source-cluster-id (ft/unparse (ft/formatter "YYYY-MM-dd-HH-mm-ss-SSS") (t/now))))]
+        cluster-id                                       (if cluster-id
+                                                           ;; if the requested cluster id already exists, append a timestamp
+                                                           (if (cluster-exists? cluster-id)
+                                                             (if no-fail-on-existing-cluster?
+                                                               (format "%s-%s" cluster-id (unique-timestamp))
+                                                               (throw (ex-info (format "cluster %s already exists" cluster-id) {:error :cluster-already-exists})))
+                                                             cluster-id)
+                                                           (format "%s-%s" source-cluster-id (unique-timestamp)))]
     (when-not root
       (throw (ex-info (format "source cluster %s does not exist" source-cluster-id) {:error :cluster-does-not-exist})))
     (when (and purge-obsolete-copies? (seq obsolete-copies))
@@ -436,7 +453,7 @@
             (terminate-cluster! {:cluster-id dbcluster-identifier :skip-final-snapshot? true})))))
     (when (pos? clone-slot-deficit)
       (let [copies-to-create (int (Math/ceil (double (/ clone-slot-deficit max-clones-per-source))))
-            copy-id-base     (format "%s-%s" cluster-id (ft/unparse (ft/formatter "YYYY-MM-dd-HH-mm-ss-SSS") (t/now)))]
+            copy-id-base     (format "%s-%s" cluster-id (unique-timestamp))]
         (log/infof "will create %s copies to gain %s missing clone slots" copies-to-create clone-slot-deficit)
         (dotimes [i copies-to-create]
           (let [copy-id (str copy-id-base "-" i)]
@@ -581,7 +598,7 @@
              :Data   data})
           (do
             (log/infof "The current clone %s is out of date; will create a new one and drop this one" cluster-id)
-            (do-create! props))))
+            (do-create! (assoc props :no-fail-on-existing-cluster? true)))))
 
       ;; otherwise create a new cluster
       :else
