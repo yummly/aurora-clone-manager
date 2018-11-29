@@ -4,6 +4,7 @@
             [amazonica.aws.securitytoken :as sts]
             [amazonica.aws.simplesystemsmanagement :as ssm]
             [amazonica.aws.kms :as kms]
+            [amazonica.aws.cloudwatchevents :as events]
             [cheshire.core :as json]
             [clj-time.core :as t]
             [clj-time.format :as ft]
@@ -95,6 +96,9 @@
 
 (defn cluster-id->arn [cluster-id]
   (format "arn:aws:rds:%s:%s:cluster:%s" (aws-region) (aws-account-id) cluster-id))
+
+(defn instance-id->arn [instance-id]
+  (format "arn:aws:rds:%s:%s:db:%s" (aws-region) (aws-account-id) instance-id))
 
 (defn arn->cluster-id [arn]
   (when-let [[_ id] (re-find #"^arn:.*:rds:.*:.*:cluster:(.*)$" arn)]
@@ -248,10 +252,6 @@
                                   :resource-policy (-> {:Version   "2012-10-17"
                                                         :Id        "key-default"
                                                         :Statement [{:Effect    "Allow"
-                                                                     :Action    ["secretsmanager:GetSecretValue"]
-                                                                     :Resource  "*"
-                                                                     :Principal {:AWS access-principal-arns}}
-                                                                    {:Effect    "Allow"
                                                                      :Action    ["secretsmanager:GetSecretValue"]
                                                                      :Resource  "*"
                                                                      :Principal {:AWS access-principal-arns}}]}
@@ -451,18 +451,22 @@
         (future
           (doseq [{:keys [dbcluster-identifier]} obsolete-copies]
             (terminate-cluster! {:cluster-id dbcluster-identifier :skip-final-snapshot? true})))))
-    (when (pos? clone-slot-deficit)
+    (if (pos? clone-slot-deficit)
       (let [copies-to-create (int (Math/ceil (double (/ clone-slot-deficit max-clones-per-source))))
             copy-id-base     (format "%s-%s" cluster-id (unique-timestamp))]
-        (log/infof "will create %s copies to gain %s missing clone slots" copies-to-create clone-slot-deficit)
+        (log/infof "will create %s copies to gain %s missing clone slots (we have %s but need %s)"
+                   copies-to-create clone-slot-deficit
+                   available-clone-slots target-clone-slots)
         (dotimes [i copies-to-create]
           (let [copy-id (str copy-id-base "-" i)]
             (log/infof "will create copy %s" copy-id)
-            (when-not dry-run?
+            (if-not dry-run?
               (create-copy! {:source-cluster-id cluster-id
                              :cluster-id        copy-id
                              ;; use the cheapest instance type since copies are not used directly
-                             :instance-class    "db.r4.large"}))))))))
+                             :instance-class    "db.r4.large"})
+              (log/infof "if this wasn't dry run, I'd be creating a copy now")))))
+      (log/infof "we have enough capacity (we have %s clone slots and need %s), doing nothing" available-clone-slots target-clone-slots))))
 
 (s/fdef maintain! :args (s/cat :args ::maintain-args))
 (stest/instrument `maintain!)

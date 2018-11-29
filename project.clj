@@ -24,6 +24,7 @@
                  [com.amazonaws/aws-java-sdk-sts ~aws-sdk-version]
                  [com.amazonaws/aws-java-sdk-ssm ~aws-sdk-version]
                  [com.amazonaws/aws-java-sdk-secretsmanager ~aws-sdk-version]
+                 [com.amazonaws/aws-java-sdk-events ~aws-sdk-version]
                  [com.taoensso/encore "2.87.0"]
                  [com.taoensso/timbre "4.7.4"
                   :exclusions [com.taoensso/encore]]

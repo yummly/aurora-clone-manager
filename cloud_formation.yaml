@@ -38,64 +38,6 @@ Parameters:
     Description: "The prefix for password secrets"
     Default: "/aurora-clone-manager/"
 Resources:
-  LambdaRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Action:
-              - 'sts:AssumeRole'
-            Effect: Allow
-            Principal:
-              Service:
-                - lambda.amazonaws.com
-      ManagedPolicyArns:
-        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
-      Policies:
-        - PolicyName: RDSManagement
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - rds:DescribeDBClusters
-                  - rds:DescribeDBInstances
-                Resource:
-                  - '*'
-              - Effect: Allow
-                Action:
-                  - rds:DescribeDBClusters
-                  - rds:DescribeDBInstances
-                  - rds:ListTagsForResource
-                  - rds:DeleteDBInstance
-                  - rds:DeleteDBCluster
-                  - rds:RestoreDBClusterToPointInTime
-                  - rds:CreateDBInstance
-                  - rds:ModifyDBCluster
-                Resource:
-                  - !Sub arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:cluster:*
-                  - !Sub arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:db:*
-                  - !Sub arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:subgrp:*
-                  - !Sub arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:og:*
-              - Effect: Allow
-                Action:
-                  - ssm:DescribeParameters
-                  - ssm:GetParameters
-                  - ssm:GetParameter
-                Resource:
-                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/maintenance-config
-              # TODO: find a way to restrict KMS and secrets manager permissions.
-              - Effect: Allow
-                Action:
-                  - 'secretsmanager:*'
-                Resource:
-                  - '*'
-              - Effect: Allow
-                Action:
-                  - 'kms:*'
-                Resource:
-                  - '*'
   Lambda:
     Type: AWS::Serverless::Function
     Properties:
@@ -105,7 +47,6 @@ Resources:
       Description: "Aurora clone management"
       MemorySize: 512
       Timeout: 300
-      Role: !GetAtt LambdaRole.Arn
       # concurrency needs to be set to 1, the Lambda doesn't support concurrent executions
       ReservedConcurrentExecutions: 1
       Environment:
@@ -126,6 +67,55 @@ Resources:
           Properties:
             Schedule: !Ref MaintenanceSchedule
             Input: '{"source": "events", "action": "maintain!"}'
+      Policies:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        - Statement:
+            - Effect: Allow
+              Action:
+                - rds:DescribeDBClusters
+                - rds:DescribeDBInstances
+              Resource:
+                - '*'
+            - Effect: Allow
+              Action:
+                - rds:DescribeDBClusters
+                - rds:DescribeDBInstances
+                - rds:ListTagsForResource
+                - rds:DeleteDBInstance
+                - rds:DeleteDBCluster
+                - rds:RestoreDBClusterToPointInTime
+                - rds:CreateDBInstance
+                - rds:ModifyDBCluster
+              Resource:
+                - !Sub arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:cluster:*
+                - !Sub arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:db:*
+                - !Sub arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:subgrp:*
+                - !Sub arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:og:*
+            - Effect: Allow
+              Action:
+                - ssm:DescribeParameters
+                - ssm:GetParameters
+                - ssm:GetParameter
+              Resource:
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/maintenance-config
+            # TODO: find a way to restrict KMS and secrets manager permissions.
+            - Effect: Allow
+              Action:
+                - 'secretsmanager:*'
+              Resource:
+                - '*'
+            - Effect: Allow
+              Action:
+                - 'kms:*'
+              Resource:
+                - '*'
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - events:PutEvents
+              Resource:
+                - '*'
   RDSEventTopic:
     Type: AWS::SNS::Topic
   RDSEventSubscription:
