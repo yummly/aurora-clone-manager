@@ -98,6 +98,11 @@ The most basic way of using this is from a Clojure repl.  You can create a clone
                             :dry-run?  true ;; if true, just explain what we would do without making any changes })
 #+END_SRC
 
+** Preparing a new cluster for use
+
+You may sometimes need to run some custom code to prepare a newly cloned cluster for use. To help with this, the clone manager sends a CloudWatch event when the cluster is up and,
+if ~SetPassword~ is true, the password has been set. The event ~source~ is ~aurora-clone-manager~, the ~detail-type~ is ~lifecycle-event/instance-ready~, and the ~detail~ is a JSON
+object with the following keys: ~instanceId~, ~clusterId~, ~host~, ~port~, ~user~, ~passwordSecret~, ~database~.
 
 * @@html:<a name="building">@@Building and deploying
 :PROPERTIES:

@@ -261,6 +261,18 @@
 (s/fdef create-password!
   :args (s/tuple ::create-password!-args))
 
+(defn send-instance-ready-event! [{:keys [instance password-secret]}]
+  (events/put-events {:entries [{:source "aurora-clone-manager"
+                                 :detail-type "lifecycle-event/instance-ready"
+                                 :detail (json/generate-string {:instanceId (:dbinstance-identifier instance)
+                                                                :clusterId (:dbcluster-identifier instance)
+                                                                :host (get-in instance [:endpoint :address])
+                                                                :port (get-in instance [:endpoint :port])
+                                                                :user (:master-username instance)
+                                                                :passwordSecret password-secret
+                                                                :database (:dbname instance)})
+                                 :resources [(:dbinstance-arn instance)]}]}))
+
 (s/def ::create-copy!-args (s/keys :req-un [::cluster-id ::source-cluster-id]
                                    :opt-un [::restore-type ::create-instance? ::db-subnet-group-name ::vpc-security-group-ids ::tags ::db-parameter-group ::cluster-parameter-group ::password-secret ::kms-key-id]))
 
@@ -731,8 +743,10 @@
             (rds/modify-db-cluster {:db-cluster-identifier cluster-id
                                     :master-user-password  password
                                     :apply-immediately     true})
+
             (log/infof "Set master password for %s to the secret %s" cluster-id password-secret))
-          (log/infof "DB cluster %s doesn't have a password secret" cluster-id)))
+          (log/infof "DB cluster %s doesn't have a password secret" cluster-id))
+        (send-instance-ready-event! {:instance instance :password-secret password-secret}))
       (log/infof "DB instance %s does not exists or is not Aurora" instance-id))))
 
 (defn handle-rds-event! [event]
