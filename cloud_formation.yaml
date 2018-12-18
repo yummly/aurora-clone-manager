@@ -116,7 +116,7 @@ Resources:
           MAINTENANCE_CONFIG_SSM: !Sub /${AWS::StackName}/maintenance-config
           DEFAULT_SECRET_PREFIX: !Ref DefaultSecretPrefix
           DEFAULT_SECRET_KEY: !If [SetupDefaultAccess, !Ref DefaultAccessKey, !Ref "AWS::NoValue"]
-          STACK_NAME: !Sub "AWS::StackName"
+          STACK_NAME: !Ref "AWS::StackName"
       Events:
         RDSEvents:
           Type: SNS
