@@ -285,16 +285,18 @@
   :args (s/tuple ::create-password!-args))
 
 (defn send-instance-ready-event! [{:keys [instance password-secret]}]
-  (events/put-events {:entries [{:source      (this-stack-name)
-                                 :detail-type "lifecycle-event/instance-ready"
-                                 :detail      (json/generate-string {:instanceId     (:dbinstance-identifier instance)
-                                                                     :clusterId      (:dbcluster-identifier instance)
-                                                                     :host           (get-in instance [:endpoint :address])
-                                                                     :port           (get-in instance [:endpoint :port])
-                                                                     :user           (:master-username instance)
-                                                                     :passwordSecret password-secret
-                                                                     :database       (:dbname instance)})
-                                 :resources   [(:dbinstance-arn instance)]}]}))
+  (let [payload {:entries [{:source      (this-stack-name)
+                            :detail-type "lifecycle-event/instance-ready"
+                            :detail      (json/generate-string {:instanceId     (:dbinstance-identifier instance)
+                                                                :clusterId      (:dbcluster-identifier instance)
+                                                                :host           (get-in instance [:endpoint :address])
+                                                                :port           (get-in instance [:endpoint :port])
+                                                                :user           (:master-username instance)
+                                                                :passwordSecret password-secret
+                                                                :database       (:dbname instance)})
+                            :resources   [(:dbinstance-arn instance)]}]}]
+    (log/infof "Sending CW event:\n%s" (with-out-str (clojure.pprint/pprint payload)))
+    (events/put-events payload)))
 
 (s/def ::create-copy!-args (s/keys :req-un [::cluster-id ::source-cluster-id]
                                    :opt-un [::restore-type ::create-instance? ::db-subnet-group-name ::vpc-security-group-ids ::tags ::db-parameter-group ::cluster-parameter-group ::password-secret ::kms-key-id]))
