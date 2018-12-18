@@ -70,6 +70,9 @@ Once you [[#building][install]] the Lambda function, you can create Aurora clone
       CopyCreatedSince: !Ref CopyCreatedSince
       SetPassword: true
       AccessPrincipalArns: arn:aws:iam::12345678:role/my-role, ...
+      KmsKeyId: optional, if provided, will be used to encrypt the password secret
+      ForceCreateKmsKey: false # if true, a new KMS key will be created and used with the password secret
+      SecretpPrefix: /my/prefix # optional, overrides the default prefix of the password secret name
 #+END_SRC
 
 You can see a full example in [[example/template.yaml][example/template.yaml]].  You can try it with the following command:
@@ -126,7 +129,14 @@ parameters:
 
 - ~MaxCopyAge~: the maximum age of a usable copy.
 - ~MaxClonesPerSource~: the maximum number of clones per Aurora cluster, this is currently limited by AWS to 15 and cannot be raised.
-- ~MaintenanceSchedule~: the schedule expression used to invoke the maintenance logic.  The default it ~rate(1 day)~ but if you want to run this at a specific time you will need to use a schedule instead of a rate.
+- ~MaintenanceSchedule~: the schedule expression used to invoke the maintenance logic.  The default it ~rate(1 day)~ but if you want to run this at a specific time you will need to
+  use a schedule instead of a rate.
+- ~DefaultSecretPrefix~: the default prefix to use when creating password secrets; defaults to ~/aurora-clone-manager/~.
+- ~SetupDefaultAccess~: boolean. If true, this stack will setup a default key for password secrets and a policy granting read access to those secrets and the key. The policy will
+  be provided as a CloudFormation export and can be attached to users/groups/roles.
+- ~DefaultAccessGroups~: attach the default access policy to these IAM groups.
+- ~DefaultAccessRoles~: attache the default access policy to these IAM roles.
+
 
 Parameters can be appended to the ~build.sh~ invocation, e.g.
 

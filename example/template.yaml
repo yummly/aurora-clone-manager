@@ -16,6 +16,7 @@ Parameters:
     Type: CommaDelimitedList
     Description: "The user to grant access to the key, see https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_principal.html#Principal_specifying"
 Resources:
+
   Clone:
     Type: Custom::AuroraClone
     Properties:
@@ -28,6 +29,7 @@ Resources:
       CopyCreatedSince: !Ref CopyCreatedSince
       SetPassword: true
       AccessPrincipalArns: !Ref AccessPrincipalArns
+
 Outputs:
   CloneClusterArn:
     Description: The ARN of the created clone

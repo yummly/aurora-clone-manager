@@ -46,7 +46,7 @@ aws s3 cp $packaged "s3://${LAMBDA_S3_BUCKET}/${LAMBDA_S3_PREFIX}/${REPO_NAME}/$
 
 if [ ! -z "$STACK_NAME" ]
 then
-    aws cloudformation deploy --template-file $packaged --stack-name $STACK_NAME --capabilities CAPABILITY_IAM --parameter-overrides "GitHubRepo=${GITHUB_REPO:-undefined}" "GitSha=${GIT_SHA:-undefined}" "GitBranchFollow=master" "$@"
+    aws cloudformation deploy --template-file $packaged --stack-name $STACK_NAME --capabilities CAPABILITY_NAMED_IAM --parameter-overrides "GitHubRepo=${GITHUB_REPO:-undefined}" "GitSha=${GIT_SHA:-undefined}" "GitBranchFollow=${GIT_BRANCH:-master}" "$@"
 fi
 
 rm -f $packaged

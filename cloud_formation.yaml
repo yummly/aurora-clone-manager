@@ -33,11 +33,69 @@ Parameters:
   GitSha:
     Type: String
     Description: "The git sha, should be provided by the build script by overwriting the default value"
-  SecretPrefix:
+  DefaultSecretPrefix:
     Type: String
     Description: "The prefix for password secrets"
     Default: "/aurora-clone-manager/"
+  SetupDefaultAccess:
+    Type: String
+    Description: "If true, this stack will setup a default key for password secrets and a policy granting read access to those secrets and the key. The policy will be exported and can be used"
+    Default: "true"
+  DefaultAccessGroups:
+    Type: CommaDelimitedList
+    Description: "Optionally provide an IAM group to assign the default acccess policy to"
+    Default: ""
+  DefaultAccessRoles:
+    Type: CommaDelimitedList
+    Description: "Optionally provide an IAM roles to assign the default acccess policy to"
+    Default: ""
+Conditions:
+  SetupDefaultAccess: !Equals [ !Ref SetupDefaultAccess, "true" ]
+  SetupDefaultAccessGroups: !And [ !Equals [ !Ref SetupDefaultAccess, "true" ], !Not [ !Equals [ !Join [ ",", !Ref DefaultAccessGroups ], ""] ] ]
+  SetupDefaultAccessRoles: !And [ !Equals [ !Ref SetupDefaultAccess, "true" ], !Not [ !Equals [ !Join [ ",", !Ref DefaultAccessRoles ], "" ] ] ]
 Resources:
+  DefaultAccessKey:
+    Condition: SetupDefaultAccess
+    Type: AWS::KMS::Key
+    Properties:
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: key-default-1
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Join
+                - ''
+                - - 'arn:aws:iam::'
+                  - !Ref 'AWS::AccountId'
+                  - ':root'
+            Action: 'kms:*'
+            Resource: '*'
+      Tags:
+        - Key: y.key-purpose
+          Value: aurora-clone-secret-default
+  DefaultAccessPolicy:
+    Condition: SetupDefaultAccess
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "default-access-for-${AWS::StackName}"
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+            Resource:
+              - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${DefaultSecretPrefix}*"
+          - Effect: Allow
+            Action:
+              - kms:Decrypt
+            Resource:
+              - !GetAtt DefaultAccessKey.Arn
+      Groups: !If [SetupDefaultAccessGroups, !Ref DefaultAccessGroups, !Ref "AWS::NoValue"]
+      Roles: !If [SetupDefaultAccessRoles, !Ref DefaultAccessRoles, !Ref "AWS::NoValue"]
+
   Lambda:
     Type: AWS::Serverless::Function
     Properties:
@@ -56,7 +114,9 @@ Resources:
           MAX_AGE: !Ref MaxCopyAge
           MAX_CLONES_PER_SOURCE: !Ref MaxClonesPerSource
           MAINTENANCE_CONFIG_SSM: !Sub /${AWS::StackName}/maintenance-config
-          SECRET_PREFIX: !Ref SecretPrefix
+          DEFAULT_SECRET_PREFIX: !Ref DefaultSecretPrefix
+          DEFAULT_SECRET_KEY: !If [SetupDefaultAccess, !Ref DefaultAccessKey, !Ref "AWS::NoValue"]
+          STACK_NAME: !Sub "AWS::StackName"
       Events:
         RDSEvents:
           Type: SNS
@@ -142,3 +202,20 @@ Outputs:
     Value: !GetAtt LambdaRole.Arn
     Export:
       Name: !Sub "${AWS::StackName}-RoleArn"
+  DefaultSecretPrefix:
+    Description: "The default prefix of password secrets"
+    Value: !Ref DefaultSecretPrefix
+    Export:
+      Name: !Sub "${AWS::StackName}-DefaultSecretPrefix"
+  DefaultPasswordSecretKmsKeyId:
+    Description: "The KMS Key Id for default access"
+    Condition: SetupDefaultAccess
+    Value: !Ref DefaultAccessKey
+    Export:
+      Name: !Sub "${AWS::StackName}-DefaultPasswordSecretKmsKeyId"
+  DefaultAccessPolicyArn:
+    Description: "The IAM Policy Arn for default access"
+    Condition: SetupDefaultAccess
+    Value: !Ref DefaultAccessPolicy
+    Export:
+      Name: !Sub "${AWS::StackName}-DefaultAccessPolicyArn"

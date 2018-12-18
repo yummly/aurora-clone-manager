@@ -56,7 +56,8 @@
 (s/def ::db-parameter-group non-empty-string?)
 (s/def ::cluster-parameter-group non-empty-string?)
 (s/def ::password-secret non-empty-string?)
-(s/def ::access-principal-arns (s/every non-empty-string? :min-count 1))
+(s/def ::access-principal-arns (s/every non-empty-string? :min-count 0))
+(s/def ::force-create-kms-key? boolean?)
 
 (def tag-role "y.aurora.role")
 (def role-source "source")
@@ -70,6 +71,8 @@
 (def tag-password-key "y.aurora.password-key")
 (def tag-key-purpose "y.key-purpose")
 (def tag-key-purpose-value "aurora-clone-secret")
+(def tag-key-disposable "y.key-disposable")
+(def tag-clone-manager-stack "y.clone-manager-stack")
 
 (def default-max-clones-per-source 15)
 (def default-max-copy-age (t/days 3))
@@ -156,26 +159,7 @@
 (defn clone-cluster? [cluster-id]
   (= (cluster-role cluster-id) role-clone))
 
-(defn terminate-cluster!
-  "Delete a cluster and all its instances. Optionally create a final snapshot."
-  [{:keys [cluster-id skip-final-snapshot?]
-    :or {skip-final-snapshot? true}}]
-  (when-not (#{role-clone role-copy} (cluster-role cluster-id))
-    (throw (ex-info "Won't terminate a non-clone cluster" {:error :not-a-clone})))
-  (log/infof "terminating cluster %s" cluster-id)
-  (let [cluster (-> (rds/describe-db-clusters {:db-cluster-identifier cluster-id})
-                    :dbclusters
-                    first)
-        members (map :dbinstance-identifier (:dbcluster-members cluster))
-        password-secret (get (cluster-tags cluster-id) tag-password-secret)
-        password-key (get (cluster-tags cluster-id) tag-password-key)]
-    (doseq [m members]
-      (rds/delete-db-instance {:db-instance-identifier m}))
-    (rds/delete-db-cluster {:db-cluster-identifier cluster-id :skip-final-snapshot skip-final-snapshot?})
-    (when password-secret
-      (secrets/delete-secret {:secret-id password-secret}))
-    (when password-key
-      (kms/schedule-key-deletion {:key-id password-key :pending-window-in-days 30}))))
+
 
 
 (defn cluster->data [cluster]
@@ -184,29 +168,29 @@
       (set/rename-keys {:dbcluster-identifier :id
                         :dbcluster-arn        :arn})))
 
-(s/def ::create-key!-args (s/keys :req-un [::access-principal-arns]))
+(s/def ::create-key!-args (s/keys :opt-un [::access-principal-arns]))
 
 (defn create-key! [{:keys [access-principal-arns] :as args}]
   (s/assert ::create-key!-args args)
   (let [{:keys [key-id arn]} (:key-metadata (kms/create-key
-                                             {:tags [{:tag-key   tag-key-purpose
-                                                      :tag-value tag-key-purpose-value}]}))]
+                                             {:tags (map->tags {tag-key-purpose tag-key-purpose-value
+                                                                tag-key-disposable "true"})}))]
     (kms/put-key-policy {:key-id      key-id
                          :policy-name "default" ;; this is the only valid value
                          :policy      (-> {:Version   "2012-10-17"
                                            :Id        "key-default"
-                                           :Statement [{:Effect    "Allow"
-                                                        :Action    ["kms:Decrypt"]
-                                                        :Resource  "*"
-                                                        :Principal {:AWS access-principal-arns}}
-                                                       {:Effect    "Allow"
-                                                        :Action    ["kms:*"]
-                                                        :Resource  "*"
-                                                        :Principal {:AWS (caller-arn)}}
-                                                       {:Effect    "Allow"
-                                                        :Action    ["kms:*"]
-                                                        :Resource  "*"
-                                                        :Principal {:AWS (format "arn:aws:iam::%s:root" (aws-account-id))}}]}
+                                           :Statement (cond-> [{:Effect    "Allow"
+                                                                :Action    ["kms:*"]
+                                                                :Resource  "*"
+                                                                :Principal {:AWS (caller-arn)}}
+                                                               {:Effect    "Allow"
+                                                                :Action    ["kms:*"]
+                                                                :Resource  "*"
+                                                                :Principal {:AWS (format "arn:aws:iam::%s:root" (aws-account-id))}}]
+                                                        (seq access-principal-arns) (conj {:Effect    "Allow"
+                                                                                           :Action    ["kms:Decrypt"]
+                                                                                           :Resource  "*"
+                                                                                           :Principal {:AWS access-principal-arns}}))}
                                           (json/generate-string {:pretty true}))})
 
     key-id))
@@ -214,30 +198,68 @@
 (s/fdef create-key!
   :args (s/tuple ::create-key!-args))
 
+(defn disposable-key? [key-id]
+  (let [{:keys [tags]} (kms/list-resource-tags {:key-id key-id})
+        tag-map (zipmap (map :tag-key tags) (map :tag-value tags))]
+    (= "true" (get tag-map tag-key-disposable))))
+
+(defn safe-delete-key [key-id]
+  (when (and key-id (disposable-key? key-id))
+    (kms/schedule-key-deletion {:key-id key-id :pending-window-in-days 30})))
+
 (defn random-password []
   (cr/hex 32))
 
 (def default-secret-prefix "/aurora-clone-manager/")
 
-(defn secret-prefix []
-  (lambda-config-property "SECRET_PREFIX" default-secret-prefix))
+(defn- not-blank [s]
+  (if (and (string? s) (not (str/blank? s)))
+    s
+    nil))
 
-(s/def ::create-password!-args (s/keys :req-un [::cluster-id ::access-principal-arns]))
+(defn default-secret-prefix []
+  (-> (lambda-config-property "DEFAULT_SECRET_PREFIX")
+      not-blank))
 
-(defn create-password! [{:keys [secret-prefix cluster-id access-principal-arns]
-                         :or   {secret-prefix default-secret-prefix}
+(defn default-secret-key []
+  (-> (lambda-config-property "DEFAULT_SECRET_KEY")
+      not-blank))
+
+(defn this-stack-name []
+  (lambda-config-property "STACK_NAME" "-repl"))
+
+(s/def ::create-password!-args (s/keys :req-un [::cluster-id]
+                                       :opt-un [::kms-key-id ::secret-prefix ::access-principal-arns ::force-create-kms-key?]))
+
+(defn create-password! [{:keys [secret-prefix cluster-id access-principal-arns kms-key-id force-create-kms-key?]
                          :as   args}]
   (s/assert ::create-password!-args args)
-  (let [secret-name          (cond-> secret-prefix
+  (let [secret-prefix        (or secret-prefix (default-secret-prefix))
+        secret-name          (cond-> secret-prefix
                                (not (str/ends-with? secret-prefix "/")) (str "/")
                                ;; add the timestamp because once a secret has been created and deleted, it apparently can't be created again
                                :always                                  (str "password/" cluster-id "-" (unique-timestamp)))
-        {:keys [kms-key-id]} (try
-                               (secrets/describe-secret {:secret-id secret-name})
-                               (catch Exception _
-                                 nil))
-        kms-key-id           (or kms-key-id
-                                 (create-key! {:access-principal-arns access-principal-arns}))]
+        kms-key-id           (or
+                              ;; use the key passed by the user, if any
+                              (->> (not-blank kms-key-id)
+                                   (log/spy :debug "provided key"))
+                              ;; create a new key if the Force options is specified
+                              (->> (when force-create-kms-key?
+                                     (create-key! {:access-principal-arns access-principal-arns}))
+                                   (log/spy :debug "force-created key"))
+                              ;; try to get the current key if the secret exists
+                              (->> (try
+                                     (:kms-key-id (secrets/describe-secret {:secret-id secret-name}))
+                                     (catch Exception _
+                                       nil))
+                                   (log/spy :debug "current key on existing secret"))
+                              ;; use the default
+                              (->> (default-secret-key)
+                                   (log/spy :debug "default key"))
+                              ;; create a new key if the Force options is specified
+                              (->> (create-key! {:access-principal-arns access-principal-arns})
+                                   (log/spy :debug "created key"))
+                              (ex-info "KMS key id not passed and default not set" {:error :no-kms-key}))]
     (try
       (secrets/put-secret-value {:secret-id     secret-name
                                  :kms-key-id    kms-key-id
@@ -248,30 +270,31 @@
                                 :kms-key-id    kms-key-id
                                 :secret-string (random-password)
                                 :tags          (map->tags {tag-cluster-id cluster-id})})))
-    (secrets/put-resource-policy {:secret-id       secret-name
-                                  :resource-policy (-> {:Version   "2012-10-17"
-                                                        :Id        "key-default"
-                                                        :Statement [{:Effect    "Allow"
-                                                                     :Action    ["secretsmanager:GetSecretValue"]
-                                                                     :Resource  "*"
-                                                                     :Principal {:AWS access-principal-arns}}]}
-                                                       (json/generate-string {:pretty true}))})
+    (when (seq access-principal-arns)
+      (secrets/put-resource-policy {:secret-id       secret-name
+                                    :resource-policy (-> {:Version   "2012-10-17"
+                                                          :Id        "key-default"
+                                                          :Statement [{:Effect    "Allow"
+                                                                       :Action    ["secretsmanager:GetSecretValue"]
+                                                                       :Resource  "*"
+                                                                       :Principal {:AWS access-principal-arns}}]}
+                                                         (json/generate-string {:pretty true}))}))
     {:password-secret secret-name :kms-key-id kms-key-id}))
 
 (s/fdef create-password!
   :args (s/tuple ::create-password!-args))
 
 (defn send-instance-ready-event! [{:keys [instance password-secret]}]
-  (events/put-events {:entries [{:source "aurora-clone-manager"
+  (events/put-events {:entries [{:source      (this-stack-name)
                                  :detail-type "lifecycle-event/instance-ready"
-                                 :detail (json/generate-string {:instanceId (:dbinstance-identifier instance)
-                                                                :clusterId (:dbcluster-identifier instance)
-                                                                :host (get-in instance [:endpoint :address])
-                                                                :port (get-in instance [:endpoint :port])
-                                                                :user (:master-username instance)
-                                                                :passwordSecret password-secret
-                                                                :database (:dbname instance)})
-                                 :resources [(:dbinstance-arn instance)]}]}))
+                                 :detail      (json/generate-string {:instanceId     (:dbinstance-identifier instance)
+                                                                     :clusterId      (:dbcluster-identifier instance)
+                                                                     :host           (get-in instance [:endpoint :address])
+                                                                     :port           (get-in instance [:endpoint :port])
+                                                                     :user           (:master-username instance)
+                                                                     :passwordSecret password-secret
+                                                                     :database       (:dbname instance)})
+                                 :resources   [(:dbinstance-arn instance)]}]}))
 
 (s/def ::create-copy!-args (s/keys :req-un [::cluster-id ::source-cluster-id]
                                    :opt-un [::restore-type ::create-instance? ::db-subnet-group-name ::vpc-security-group-ids ::tags ::db-parameter-group ::cluster-parameter-group ::password-secret ::kms-key-id]))
@@ -295,12 +318,13 @@
           ;; if the source is a copy, it will have the data-timestamp tag. otherwise consider the data up-to-date
           source-data-timestamp (tags->data-timestamp source-tags (t/now))
           tags                  (cond-> tags
-                                  :always         (merge {tag-role           (case (name restore-type)
-                                                                               "full-copy"     role-copy
-                                                                               "copy-on-write" role-clone)
-                                                          tag-source-arn     (:dbcluster-arn source)
-                                                          tag-root-arn       (get source-tags tag-root-arn (:dbcluster-arn source))
-                                                          tag-data-timestamp (ft/unparse (:date-time ft/formatters) source-data-timestamp)})
+                                  :always         (merge {tag-role                (case (name restore-type)
+                                                                                    "full-copy"     role-copy
+                                                                                    "copy-on-write" role-clone)
+                                                          tag-source-arn          (:dbcluster-arn source)
+                                                          tag-root-arn            (get source-tags tag-root-arn (:dbcluster-arn source))
+                                                          tag-data-timestamp      (ft/unparse (:date-time ft/formatters) source-data-timestamp)
+                                                          tag-clone-manager-stack (this-stack-name)})
                                   password-secret (assoc tag-password-secret password-secret
                                                          tag-password-key kms-key-id))
           cluster               (rds/restore-db-cluster-to-point-in-time
@@ -391,9 +415,31 @@
      :cloneable-sources     cloneable-sources
      :available-clone-slots (- (* (count sources-with-available-slots) max-clones-per-source) (count clones))}))
 
+(defn terminate-cluster!
+  "Delete a cluster and all its instances. Optionally create a final snapshot."
+  [{:keys [cluster-id skip-final-snapshot?]
+    :or {skip-final-snapshot? true}}]
+  (when-not (#{role-clone role-copy} (cluster-role cluster-id))
+    (throw (ex-info "Won't terminate a non-clone cluster" {:error :not-a-clone})))
+  (log/infof "terminating cluster %s" cluster-id)
+  (let [cluster (-> (rds/describe-db-clusters {:db-cluster-identifier cluster-id})
+                    :dbclusters
+                    first)
+        members (map :dbinstance-identifier (:dbcluster-members cluster))
+        password-secret (get (cluster-tags cluster-id) tag-password-secret)
+        password-key (get (cluster-tags cluster-id) tag-password-key)]
+    (doseq [m members]
+      (rds/delete-db-instance {:db-instance-identifier m}))
+    (rds/delete-db-cluster {:db-cluster-identifier cluster-id :skip-final-snapshot skip-final-snapshot?})
+    (when password-secret
+      (secrets/delete-secret {:secret-id password-secret}))
+    (when password-key
+      (safe-delete-key password-key))))
+
 (defn provision-cluster-copy!
   "Create a Aurora cluster clone or copy."
-  [{:keys [source-cluster-id cluster-id max-copy-age max-clones-per-source instance-class purge-obsolete-copies? copy-ok? dry-run? copy-created-since secret-prefix set-password? access-principal-arns no-fail-on-existing-cluster?]
+  [{:keys [source-cluster-id cluster-id max-copy-age max-clones-per-source instance-class purge-obsolete-copies? copy-ok? dry-run? copy-created-since secret-prefix set-password? access-principal-arns no-fail-on-existing-cluster?
+           kms-key-id secret-prefix force-create-kms-key?]
     :or   {purge-obsolete-copies? true
            copy-ok?               true
            instance-class         "db.r4.large"
@@ -421,7 +467,11 @@
           (doseq [{:keys [dbcluster-identifier]} obsolete-copies]
             (terminate-cluster! {:cluster-id dbcluster-identifier :skip-final-snapshot? true})))))
     (let [password      (when set-password?
-                          (create-password! {:cluster-id cluster-id :access-principal-arns access-principal-arns}))
+                          (create-password! (merge {:cluster-id cluster-id}
+                                                   (select-keys args [:access-principal-arns
+                                                                      :secret-prefix
+                                                                      :kms-key-id
+                                                                      :force-create-kms-key?]))))
           copy-args     (cond-> {:source-cluster-id source-cluster-id :instance-class instance-class :cluster-id cluster-id}
                           password (merge password))
           cloneable?    (boolean (first cloneable-sources))
@@ -540,7 +590,10 @@
                         :InstanceClass       :instance-class
                         :CopyCreatedSince    :copy-created-since
                         :SetPassword         :set-password?
-                        :AccessPrincipalArns :access-principal-arns})
+                        :AccessPrincipalArns :access-principal-arns
+                        :KmsKeyId            :kms-key-id
+                        :ForceCreateKmsKey   :force-create-kms-key?
+                        :SecretpPrefix       :secret-prefix})
       (update :copy-created-since (fnil ft/parse "2000-00-00"))))
 
 (defn do-create! [args]
@@ -738,15 +791,16 @@
     (if cluster-id
       (let [tags            (cluster-tags cluster-id)
             password-secret (get tags tag-password-secret)]
-        (if password-secret
-          (let [password (:secret-string (secrets/get-secret-value {:secret-id password-secret}))]
-            (rds/modify-db-cluster {:db-cluster-identifier cluster-id
-                                    :master-user-password  password
-                                    :apply-immediately     true})
+        (when (= (this-stack-name) (get tags tag-clone-manager-stack))
+          (if password-secret
+            (let [password (:secret-string (secrets/get-secret-value {:secret-id password-secret}))]
+              (rds/modify-db-cluster {:db-cluster-identifier cluster-id
+                                      :master-user-password  password
+                                      :apply-immediately     true})
 
-            (log/infof "Set master password for %s to the secret %s" cluster-id password-secret))
-          (log/infof "DB cluster %s doesn't have a password secret" cluster-id))
-        (send-instance-ready-event! {:instance instance :password-secret password-secret}))
+              (log/infof "Set master password for %s to the secret %s" cluster-id password-secret))
+            (log/infof "DB cluster %s doesn't have a password secret" cluster-id))
+          (send-instance-ready-event! {:instance instance :password-secret password-secret})))
       (log/infof "DB instance %s does not exists or is not Aurora" instance-id))))
 
 (defn handle-rds-event! [event]
