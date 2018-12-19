@@ -673,7 +673,7 @@
 
       ;; otherwise create a new cluster
       :else
-      (do-create! props))))
+      (do-create! (assoc props :no-fail-on-existing-cluster? true)))))
 
 (defn handle-delete! [{:keys [response-url properties request-id logical-resource-id stack-id physical-resource-id]}]
   (if-let [cluster-id (arn->cluster-id physical-resource-id)]
