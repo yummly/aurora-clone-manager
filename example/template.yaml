@@ -29,7 +29,8 @@ Resources:
       CopyCreatedSince: !Ref CopyCreatedSince
       SetPassword: true
       AccessPrincipalArns: !Ref AccessPrincipalArns
-
+      Tags:
+        test-tag: test-value
 Outputs:
   CloneClusterArn:
     Description: The ARN of the created clone

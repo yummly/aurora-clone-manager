@@ -58,6 +58,7 @@
 (s/def ::password-secret non-empty-string?)
 (s/def ::access-principal-arns (s/every non-empty-string? :min-count 0))
 (s/def ::force-create-kms-key? boolean?)
+(s/def ::tags (s/nilable (s/map-of string? string?)))
 
 (def tag-role "y.aurora.role")
 (def role-source "source")
@@ -168,13 +169,14 @@
       (set/rename-keys {:dbcluster-identifier :id
                         :dbcluster-arn        :arn})))
 
-(s/def ::create-key!-args (s/keys :opt-un [::access-principal-arns]))
+(s/def ::create-key!-args (s/keys :opt-un [::access-principal-arns ::tags]))
 
-(defn create-key! [{:keys [access-principal-arns] :as args}]
+(defn create-key! [{:keys [access-principal-arns tags] :as args}]
   (s/assert ::create-key!-args args)
   (let [{:keys [key-id arn]} (:key-metadata (kms/create-key
-                                             {:tags (map->tags {tag-key-purpose tag-key-purpose-value
-                                                                tag-key-disposable "true"})}))]
+                                             {:tags (map->tags (merge tags
+                                                                      {tag-key-purpose    tag-key-purpose-value
+                                                                       tag-key-disposable "true"}))}))]
     (kms/put-key-policy {:key-id      key-id
                          :policy-name "default" ;; this is the only valid value
                          :policy      (-> {:Version   "2012-10-17"
@@ -229,9 +231,9 @@
   (lambda-config-property "STACK_NAME" "-repl"))
 
 (s/def ::create-password!-args (s/keys :req-un [::cluster-id]
-                                       :opt-un [::kms-key-id ::secret-prefix ::access-principal-arns ::force-create-kms-key?]))
+                                       :opt-un [::kms-key-id ::secret-prefix ::access-principal-arns ::force-create-kms-key? ::tags]))
 
-(defn create-password! [{:keys [secret-prefix cluster-id access-principal-arns kms-key-id force-create-kms-key?]
+(defn create-password! [{:keys [secret-prefix cluster-id access-principal-arns kms-key-id force-create-kms-key? tags]
                          :as   args}]
   (s/assert ::create-password!-args args)
   (let [secret-prefix        (or secret-prefix (default-secret-prefix))
@@ -245,7 +247,7 @@
                                    (log/spy :debug "provided key"))
                               ;; create a new key if the Force options is specified
                               (->> (when force-create-kms-key?
-                                     (create-key! {:access-principal-arns access-principal-arns}))
+                                     (create-key! {:access-principal-arns access-principal-arns :tags tags}))
                                    (log/spy :debug "force-created key"))
                               ;; try to get the current key if the secret exists
                               (->> (try
@@ -257,7 +259,7 @@
                               (->> (default-secret-key)
                                    (log/spy :debug "default key"))
                               ;; create a new key if the Force options is specified
-                              (->> (create-key! {:access-principal-arns access-principal-arns})
+                              (->> (create-key! {:access-principal-arns access-principal-arns :tags tags})
                                    (log/spy :debug "created key"))
                               (ex-info "KMS key id not passed and default not set" {:error :no-kms-key}))]
     (try
@@ -269,7 +271,7 @@
         (secrets/create-secret {:name          secret-name
                                 :kms-key-id    kms-key-id
                                 :secret-string (random-password)
-                                :tags          (map->tags {tag-cluster-id cluster-id})})))
+                                :tags          (map->tags (merge tags {tag-cluster-id cluster-id}))})))
     (when (seq access-principal-arns)
       (secrets/put-resource-policy {:secret-id       secret-name
                                     :resource-policy (-> {:Version   "2012-10-17"
@@ -299,7 +301,7 @@
     (events/put-events payload)))
 
 (s/def ::create-copy!-args (s/keys :req-un [::cluster-id ::source-cluster-id]
-                                   :opt-un [::restore-type ::create-instance? ::db-subnet-group-name ::vpc-security-group-ids ::tags ::db-parameter-group ::cluster-parameter-group ::password-secret ::kms-key-id]))
+                                   :opt-un [::restore-type ::create-instance? ::db-subnet-group-name ::vpc-security-group-ids ::tags ::db-parameter-group ::cluster-parameter-group ::password-secret ::kms-key-id ::tags]))
 
 (defn create-copy!
   "Create a copy of the cluster by restoring a backup. The `restore-type` parameter specifies whether it's a full copy (`full-copy`) or a clone (`copy-on-write`)"
@@ -345,7 +347,8 @@
          (cond-> {:db-cluster-identifier  cluster-id
                   :db-instance-identifier cluster-id
                   :engine                 (:engine source)
-                  :db-instance-class      instance-class}
+                  :db-instance-class      instance-class
+                  :tags                   (map->tags tags)}
            db-parameter-group (assoc :db-parameter-group-name db-parameter-group))))
       (cluster->data cluster))))
 
@@ -441,7 +444,7 @@
 (defn provision-cluster-copy!
   "Create a Aurora cluster clone or copy."
   [{:keys [source-cluster-id cluster-id max-copy-age max-clones-per-source instance-class purge-obsolete-copies? copy-ok? dry-run? copy-created-since secret-prefix set-password? access-principal-arns no-fail-on-existing-cluster?
-           kms-key-id secret-prefix force-create-kms-key?]
+           kms-key-id secret-prefix force-create-kms-key? tags]
     :or   {purge-obsolete-copies? true
            copy-ok?               true
            instance-class         "db.r4.large"
@@ -473,9 +476,11 @@
                                                    (select-keys args [:access-principal-arns
                                                                       :secret-prefix
                                                                       :kms-key-id
-                                                                      :force-create-kms-key?]))))
+                                                                      :force-create-kms-key?
+                                                                      :tags]))))
           copy-args     (cond-> {:source-cluster-id source-cluster-id :instance-class instance-class :cluster-id cluster-id}
-                          password (merge password))
+                          password (merge password)
+                          tags     (assoc :tags tags))
           cloneable?    (boolean (first cloneable-sources))
           _             (when (and (not cloneable?) (not copy-ok?))
                           (throw (ex-info (format "unable to provision a cluster because there are not clone slots available and :copy-ok? was false")
@@ -595,8 +600,10 @@
                         :AccessPrincipalArns :access-principal-arns
                         :KmsKeyId            :kms-key-id
                         :ForceCreateKmsKey   :force-create-kms-key?
-                        :SecretpPrefix       :secret-prefix})
-      (update :copy-created-since (fnil ft/parse "2000-00-00"))))
+                        :SecretpPrefix       :secret-prefix
+                        :Tags                :tags})
+      (update :copy-created-since (fnil ft/parse "2000-00-00"))
+      (update :tags clojure.walk/stringify-keys)))
 
 (defn do-create! [args]
   (let [{:keys [arn] :as ret} (provision-cluster-copy! (assoc args :dry-run? false))]

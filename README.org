@@ -73,6 +73,8 @@ Once you [[#building][install]] the Lambda function, you can create Aurora clone
       KmsKeyId: optional, if provided, will be used to encrypt the password secret
       ForceCreateKmsKey: false # if true, a new KMS key will be created and used with the password secret
       SecretpPrefix: /my/prefix # optional, overrides the default prefix of the password secret name
+      Tags:
+        TagKey: TagValue
 #+END_SRC
 
 You can see a full example in [[example/template.yaml][example/template.yaml]].  You can try it with the following command:
