@@ -3,7 +3,7 @@
 (defproject aurora-clone-manager "0.1.0-SNAPSHOT"
   :description "Create and delete Aurora clones on demand"
   :license {:name "Eclipse Public License"
-            :url  "http://www.eclipse.org/legal/epl-v10.html"}
+            :url  "https://www.eclipse.org/org/documents/epl-2.0/EPL-2.0.html"}
   :dependencies [[org.clojure/clojure "1.9.0"]
                  [amazonica "0.3.132"
                   :exclusions [com.amazonaws/aws-java-sdk
@@ -12,8 +12,6 @@
                                com.taoensso/nippy]]
                  [com.amazonaws/aws-lambda-java-core "1.1.0"]
                  [com.amazonaws/aws-lambda-java-events "1.3.0"]
-                 ;; [com.amazonaws/aws-lambda-java-events "1.3.0"
-                 ;;  :exclusions [com.amazonaws/aws-java-sdk-dynamodb]]
                  [com.amazonaws/aws-lambda-java-log4j "1.0.0"]
                  [com.amazonaws/aws-java-sdk-s3 ~aws-sdk-version]
                  [com.amazonaws/aws-java-sdk-kinesis ~aws-sdk-version]
