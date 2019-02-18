@@ -2,14 +2,16 @@
 
 * Overview
 
-This is a utility for creating AWS RDS Aurora clones on demand, e.g., clones of a production DB for test purposes.  The great thing about Aurora clones is the copy-on-write
+This is a utility for creating AWS RDS Aurora [[https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Aurora.Managing.Clone.html][clones]] on demand, e.g., clones of a production DB for test purposes.  The great thing about Aurora clones is the copy-on-write
 implementation which makes them reasonably cheap and fast.
 
 This utility solves for two shortcomings in current Aurora functionality:
 
 1. Clones can't be created from CloudFormation.
 
-   This utility can be deployed as a Lambda function (details below) implementing a custom "Aurora clone" resource.
+   While CloudFormation [[https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-rds-dbcluster.html][allows]] creating clusters from snapshots or empty, clones of running clusters can be created only by calling the [[https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_RestoreDBClusterToPointInTime.html][RestoreDBClusterToPointInTime]] API with
+   ~RestoreType=copy-on-write~ or the equivalent CLI or console operations.  This utility can be deployed as a Lambda function (details below) implementing a [[https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/template-custom-resources.html][custom resource]] type:
+   clone of an existing cluster.
 
 2. A single cluster can have no more than 15 clones.
 
