@@ -802,7 +802,7 @@
                               :dbinstances
                               first)
         cluster-id        (:dbcluster-identifier instance)
-        creation-duration (cluster-age cluster-id)]
+        creation-duration (t/interval (cluster-create-time cluster-id) (t/now))]
     (log/infof "DB instance %s creation took %s seconds from cluster creation until instance availability" instance-id (t/in-seconds creation-duration))
     (if cluster-id
       (let [tags            (cluster-tags cluster-id)
