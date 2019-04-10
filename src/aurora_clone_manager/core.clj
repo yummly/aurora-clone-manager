@@ -392,27 +392,29 @@
         obsolete-copies              (for [{:keys [cluster-create-time] :as copy} copies
                                            :when                                  (too-old? copy)]
                                        copy)
-        fresh-copies                 (for [{:keys [cluster-create-time status] :as copy} copies
-                                           :when                                         (not (too-old? copy))
-                                           :when                                         (fresh-enough? copy)]
-                                       copy)
+        fresh-copies                 (conj (vec (for [{:keys [cluster-create-time status] :as copy} copies
+                                                      :when                                         (not (too-old? copy))
+                                                      :when                                         (fresh-enough? copy)]
+                                                  copy))
+                                           root)
         ;; copies that can be cloned
         eligible-copies              (for [{:keys [status] :as copy} fresh-copies
                                            :when                     (= status "available")]
                                        copy)
-        clones-by-source             (group-by
+        clones-by-source-arn         (group-by
                                       #(get-in % [:tags tag-source-arn])
                                       clones)
-        cloneable?                   (fn [source-id]
-                                       (< (count (clones-by-source source-id)) max-clones-per-source))
+        cloneable?                   (fn [{:keys [dbcluster-arn]}]
+                                       (< (count (clones-by-source-arn dbcluster-arn)) max-clones-per-source))
         ;; the cloneable source are the master and any fresh copies in the available state, unless all clone slots are take,
-        cloneable-sources            (cons cluster-id (->> eligible-copies
-                                                           (filter cloneable?)
-                                                           (map :dbcluster-identifier)))
+        ;; prefer copies to the main source
+        cloneable-sources            (->> eligible-copies
+                                          (filter cloneable?)
+                                          (map :dbcluster-identifier))
         ;; copies in creating state count against available slots
-        sources-with-available-slots (cons cluster-id (->> fresh-copies
-                                                           (filter cloneable?)
-                                                           (map :dbcluster-identifier)))]
+        sources-with-available-slots (->> fresh-copies
+                                          (filter cloneable?)
+                                          (map :dbcluster-identifier))]
     {:root                  root
      :copies                copies
      :clones                clones
@@ -471,25 +473,28 @@
         (future
           (doseq [{:keys [dbcluster-identifier]} obsolete-copies]
             (terminate-cluster! {:cluster-id dbcluster-identifier :skip-final-snapshot? true})))))
-    (let [password      (when set-password?
-                          (create-password! (merge {:cluster-id cluster-id}
-                                                   (select-keys args [:access-principal-arns
-                                                                      :secret-prefix
-                                                                      :kms-key-id
-                                                                      :force-create-kms-key?
-                                                                      :tags]))))
-          copy-args     (cond-> {:source-cluster-id source-cluster-id :instance-class instance-class :cluster-id cluster-id}
-                          password (merge password)
-                          tags     (assoc :tags tags))
-          cloneable?    (boolean (first cloneable-sources))
-          _             (when (and (not cloneable?) (not copy-ok?))
-                          (throw (ex-info (format "unable to provision a cluster because there are not clone slots available and :copy-ok? was false")
-                                          {:error :no-clone-slots-and-not-copy-ok})))
-          _             (if cloneable?
-                          (log/infof "creating a clone of %s" source-cluster-id)
-                          (log/infof "no clone slots available, will create a copy of %s" source-cluster-id))
-          copy-resource (when-not dry-run?
-                          (create-copy! (assoc copy-args :restore-type (if cloneable? :copy-on-write :full-copy))))]
+    (let [password         (when set-password?
+                             (create-password! (merge {:cluster-id cluster-id}
+                                                      (select-keys args [:access-principal-arns
+                                                                         :secret-prefix
+                                                                         :kms-key-id
+                                                                         :force-create-kms-key?
+                                                                         :tags]))))
+          copy-args        (cond-> {:source-cluster-id source-cluster-id :instance-class instance-class :cluster-id cluster-id}
+                             password (merge password)
+                             tags     (assoc :tags tags))
+          cloneable-source (rand-nth cloneable-sources)
+          _                (when (and (not cloneable-source) (not copy-ok?))
+                             (throw (ex-info (format "unable to provision a cluster because there are not clone slots available and :copy-ok? was false")
+                                             {:error :no-clone-slots-and-not-copy-ok})))
+          _                (if cloneable-source
+                             (log/infof "creating a clone of %s" cloneable-source)
+                             (log/infof "no clone slots available, will create a copy of %s" source-cluster-id))
+          copy-resource    (when-not dry-run?
+                             (create-copy! (cond-> copy-args
+                                             cloneable-source (assoc :restore-type :copy-on-write
+                                                                     :source-cluster-id cloneable-source)
+                                             (not cloneable-source) (assoc :restore-type :full-copy))))]
       (merge copy-resource password))))
 
 
@@ -792,11 +797,13 @@
     :else (log/warnf "Unrecognized action in event %s" event)))
 
 (defn handle-rds-instance-created! [{:keys [event-source event-time source-id event-id event-message] :as event}]
-  (let [instance-id source-id
-        instance    (-> (rds/describe-db-instances {:db-instance-identifier instance-id})
-                        :dbinstances
-                        first)
-        cluster-id  (:dbcluster-identifier instance)]
+  (let [instance-id       source-id
+        instance          (-> (rds/describe-db-instances {:db-instance-identifier instance-id})
+                              :dbinstances
+                              first)
+        cluster-id        (:dbcluster-identifier instance)
+        creation-duration (cluster-age cluster-id)]
+    (log/infof "DB instance %s creation took %s seconds from cluster creation until instance availability" instance-id (t/in-seconds creation-duration))
     (if cluster-id
       (let [tags            (cluster-tags cluster-id)
             password-secret (get tags tag-password-secret)]
