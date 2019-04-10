@@ -595,18 +595,19 @@
   "Convert properties as specified in a CF resource into the internal representation"
   [properties]
   (-> properties
-      (set/rename-keys {:SourceClusterId     :source-cluster-id
-                        :ClusterId           :cluster-id
-                        :CopyOk              :copy-ok?
-                        :PurgeObsoleteCopies :purge-obsolete-copies?
-                        :InstanceClass       :instance-class
-                        :CopyCreatedSince    :copy-created-since
-                        :SetPassword         :set-password?
-                        :AccessPrincipalArns :access-principal-arns
-                        :KmsKeyId            :kms-key-id
-                        :ForceCreateKmsKey   :force-create-kms-key?
-                        :SecretpPrefix       :secret-prefix
-                        :Tags                :tags})
+      (set/rename-keys {:SourceClusterId         :source-cluster-id
+                        :ClusterId               :cluster-id
+                        :CopyOk                  :copy-ok?
+                        :PurgeObsoleteCopies     :purge-obsolete-copies?
+                        :InstanceClass           :instance-class
+                        :CopyCreatedSince        :copy-created-since
+                        :SetPassword             :set-password?
+                        :AccessPrincipalArns     :access-principal-arns
+                        :KmsKeyId                :kms-key-id
+                        :ForceCreateKmsKey       :force-create-kms-key?
+                        :SecretpPrefix           :secret-prefix
+                        :NoFailOnExistingCluster :no-fail-on-existing-cluster?
+                        :Tags                    :tags})
       (update :copy-created-since (fnil ft/parse "2000-00-00"))
       (update :tags clojure.walk/stringify-keys)))
 

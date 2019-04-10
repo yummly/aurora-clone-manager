@@ -66,6 +66,7 @@ Once you [[#building][install]] the Lambda function, you can create Aurora clone
     Properties:
       # replace ${CloneManagerStackName} with the name of the stack you used to deploy the Lambda. In the example below, it's aurora-clone-manager
       ServiceToken: !ImportValue '${CloneManagerStackName}-LambdaArn'
+      ClusterId: "cluster-id " # optional; if specified, will be used to name the new cluster; if not specified, will be generated
       SourceClusterId: !Ref SourceClusterId
       CopyOk: false
       InstanceClass: db.r4.large
@@ -75,6 +76,9 @@ Once you [[#building][install]] the Lambda function, you can create Aurora clone
       KmsKeyId: optional, if provided, will be used to encrypt the password secret
       ForceCreateKmsKey: false # if true, a new KMS key will be created and used with the password secret
       SecretpPrefix: /my/prefix # optional, overrides the default prefix of the password secret name
+      NoFailOnExistingCluster: false # if true, and the ClusterId is specified, and a cluster with this name already exists,
+                                     # then a new name will be generated from the specified ClusterId and a timestamp.
+                                     # this helps avoid timing problems when e.g. you delete a stack and immediately create a new one which uses the same ClusterId
       Tags:
         TagKey: TagValue
 #+END_SRC
