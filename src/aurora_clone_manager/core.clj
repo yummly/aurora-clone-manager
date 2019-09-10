@@ -499,14 +499,14 @@
 
 
 (s/def ::maintain-args (s/keys :req-un [::cluster-id ::target-clone-slots]
-                               :opt-un [::purge-obsolete-copies? ::max-clones-per-source ::max-copy-age ::dry-run?]))
+                               :opt-un [::purge-obsolete-copies? ::max-clones-per-source ::max-copy-age ::dry-run? ::instance-class]))
 
 (defn maintain!
   "Perform maintenance on a cluster:
 
   1. Purge copies that are too old to clone.
   2. Create new copies if necessary to allow for creation of `target-clone-slots` additional clones."
-  [{:keys [cluster-id target-clone-slots max-copy-age max-clones-per-source purge-obsolete-copies? dry-run?]
+  [{:keys [cluster-id target-clone-slots max-copy-age max-clones-per-source purge-obsolete-copies? dry-run? instance-class]
     :or   {purge-obsolete-copies? true
            dry-run?               true
            max-clones-per-source  default-max-clones-per-source}
@@ -538,7 +538,7 @@
               (create-copy! {:source-cluster-id cluster-id
                              :cluster-id        copy-id
                              ;; use the cheapest instance type since copies are not used directly
-                             :instance-class    "db.r4.large"})
+                             :instance-class    (or instance-class "db.r4.large")})
               (log/infof "if this wasn't dry run, I'd be creating a copy now")))))
       (log/infof "we have enough capacity (we have %s clone slots and need %s), doing nothing" available-clone-slots target-clone-slots))))
 
