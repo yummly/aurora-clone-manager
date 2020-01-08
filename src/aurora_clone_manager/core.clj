@@ -146,6 +146,11 @@
         :when (and k v)]
     {:key k :value v}))
 
+(defn map->key-tags [tags]
+  (for [[k v] tags
+        :when (and k v)]
+    {:tag-key k :tag-value v}))
+
 (defn cluster-data-timestamp [cluster-id]
   (-> (cluster-tags cluster-id)
       (tags->data-timestamp nil)))
@@ -174,7 +179,7 @@
 (defn create-key! [{:keys [access-principal-arns tags] :as args}]
   (s/assert ::create-key!-args args)
   (let [{:keys [key-id arn]} (:key-metadata (kms/create-key
-                                             {:tags (map->tags (merge tags
+                                             {:tags (map->key-tags (merge tags
                                                                       {tag-key-purpose    tag-key-purpose-value
                                                                        tag-key-disposable "true"}))}))]
     (kms/put-key-policy {:key-id      key-id
@@ -265,8 +270,7 @@
     (try
       (secrets/put-secret-value {:secret-id     secret-name
                                  :kms-key-id    kms-key-id
-                                 :secret-string (random-password)
-                                 :tags          (map->tags {tag-cluster-id cluster-id})})
+                                 :secret-string (random-password)})
       (catch ResourceNotFoundException _
         (secrets/create-secret {:name          secret-name
                                 :kms-key-id    kms-key-id
@@ -392,11 +396,14 @@
         obsolete-copies              (for [{:keys [cluster-create-time] :as copy} copies
                                            :when                                  (too-old? copy)]
                                        copy)
-        fresh-copies                 (conj (vec (for [{:keys [cluster-create-time status] :as copy} copies
+        ;; we prefer to clone root. if full, then prefer the most recent copy
+        fresh-copies                 (cons root
+                                           (->> (for [{:keys [cluster-create-time status] :as copy} copies
                                                       :when                                         (not (too-old? copy))
                                                       :when                                         (fresh-enough? copy)]
-                                                  copy))
-                                           root)
+                                                  copy)
+                                                (sort-by :cluster-create-time)
+                                                reverse))
         ;; copies that can be cloned
         eligible-copies              (for [{:keys [status] :as copy} fresh-copies
                                            :when                     (= status "available")]
@@ -483,7 +490,7 @@
           copy-args        (cond-> {:source-cluster-id source-cluster-id :instance-class instance-class :cluster-id cluster-id}
                              password (merge password)
                              tags     (assoc :tags tags))
-          cloneable-source (rand-nth cloneable-sources)
+          cloneable-source (first cloneable-sources)
           _                (when (and (not cloneable-source) (not copy-ok?))
                              (throw (ex-info (format "unable to provision a cluster because there are not clone slots available and :copy-ok? was false")
                                              {:error :no-clone-slots-and-not-copy-ok})))
